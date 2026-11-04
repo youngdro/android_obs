@@ -32,6 +32,8 @@ class AudioPipeline(
     private var thread: Thread? = null
     @Volatile private var running = false
     @Volatile var muted = false
+    /** 音画同步测试：替换麦克风输入，在每个整秒（MONOTONIC）开始的 50ms 内输出 1kHz 提示音，其余静音。 */
+    @Volatile var syncTest = false
 
     private val encoderLock = Any()
     private var codec: MediaCodec? = null
@@ -130,6 +132,14 @@ class AudioPipeline(
             }
 
             if (muted) java.util.Arrays.fill(buf, 0, n, 0.toShort())
+            if (syncTest) {
+                for (f in 0 until frames) {
+                    val t = ptsNs + f * 1_000_000_000L / sampleRate
+                    val inSec = t % 1_000_000_000L
+                    val v = if (!muted && inSec < 50_000_000L) (Math.sin(2 * Math.PI * 1000 * inSec / 1e9) * 16000).toInt().toShort() else 0
+                    for (ch in 0 until channels) buf[f * channels + ch] = v
+                }
+            }
             for (i in 0 until n) {
                 bytes[i * 2] = (buf[i].toInt() and 0xFF).toByte()
                 bytes[i * 2 + 1] = (buf[i].toInt() shr 8).toByte()

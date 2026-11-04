@@ -9,7 +9,9 @@
 
 - [架构方案](docs/ARCHITECTURE.md)：网页如何进入编码画面、时间戳、重连、生效时机、首版系统行为
 - [透明网页接入规范](docs/WEB_OVERLAY_SPEC.md)：透明背景写法、推荐视口、字体、支持的动画类型
-- [技术验证与真机测试清单](docs/VALIDATION.md)
+- [技术验证与真机测试清单](docs/VALIDATION.md)、[真机测试报告模板](docs/TEST_REPORT_TEMPLATE.md)
+- [第三方依赖与许可证清单](docs/THIRD_PARTY.md)
+- 音画同步测量：[`tools/av_sync.py`](tools/av_sync.py)
 - 固定测试网页：[`app/src/main/assets/testpage/index.html`](app/src/main/assets/testpage/index.html)，数据服务器：[`tools/overlay-server.mjs`](tools/overlay-server.mjs)
 
 ## 功能（本版本）
@@ -25,6 +27,9 @@
 | 麦克风、静音（接收端同步静音）、电平显示 | ✅ |
 | RTMP / RTMPS，完整 URL 或“服务器 + Stream Key”，密钥加密保存、日志脱敏 | ✅ 云端实测 |
 | 状态：连接中 / 直播中 / 重连中 / 失败；时长、输出帧率、发送码率、丢帧、重连次数 | ✅ |
+| 常驻性能信息：合成帧率、网页采集模式/帧率/耗时、内存、电池温度、热状态；直播运行日志 CSV 自动导出 | ✅ |
+| 系统网络监听：网络恢复立即重连，断网主动进入重连 | ✅ |
+| 音画同步测试信号 + `tools/av_sync.py` 自动测量 | ✅ |
 | 自动重连 1、2、5、10 秒递增，最大 10 秒；错误分类 | ✅ 云端实测 |
 | 配置保存与恢复（推流需手动开始） | ✅ |
 
@@ -54,7 +59,7 @@ bash verify/run-e2e.sh
 - 首版只支持一个网页图层。WebGL、网页视频/音频未承诺支持，网页声音不会混入直播。
 - 网页 GPU 采集依赖系统 WebView 在离屏 Surface 上的硬件绘制，必须在约定真机上验证；异常机型可切换到 CPU 采集。
 - 摄像头方向在少数机型上可能需要用“摄像头旋转校正”手动修正。
-- release 包目前用 debug 签名，正式发布前需替换为正式签名。
+- release 包目前用 debug 签名。正式发布前生成自己的签名（`keytool -genkeypair -v -keystore release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias livecomposer`），在 `app/build.gradle.kts` 的 `signingConfigs` 中配置，密码放在 CI Secrets 或本机 `~/.gradle/gradle.properties`，不要提交到仓库。
 
 ## 目录
 

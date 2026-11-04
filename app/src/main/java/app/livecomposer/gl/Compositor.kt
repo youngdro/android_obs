@@ -67,6 +67,15 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
 
     @Volatile private var scene: List<RenderLayer> = emptyList()
 
+    /**
+     * 音画同步测试信号：画面左上角 1/8 区域平时为黑块，每到整秒（MONOTONIC 时钟）的第一帧变白；
+     * 音频侧在同一整秒时刻插入 1kHz 提示音（见 AudioPipeline.syncTest）。接收端用 tools/av_sync.py 测量偏差。
+     */
+    @Volatile var syncTest = false
+    private var lastFlashSec = -1L
+    private var whiteTex = 0
+    private var blackTex = 0
+
     // 输出
     private var fbo = 0
     private var fboTex = 0
@@ -97,6 +106,8 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
             st.setOnFrameAvailableListener({ cameraFrameAvailable = true }, handler)
             cameraSt = st
             createFbo()
+            whiteTex = solidTexture(0xFFFFFFFF.toInt())
+            blackTex = solidTexture(0xFF000000.toInt())
             running = true
             clockStartNs = System.nanoTime()
             frameIndex = 0
@@ -244,6 +255,15 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
     }
 
+    private fun solidTexture(argb: Int): Int {
+        val bmp = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+        bmp.eraseColor(argb)
+        val t = QuadRenderer.createTexture(false)
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
+        bmp.recycle()
+        return t
+    }
+
     private fun deleteFbo() {
         GLES20.glDeleteFramebuffers(1, intArrayOf(fbo), 0)
         GLES20.glDeleteTextures(1, intArrayOf(fboTex), 0)
@@ -277,6 +297,9 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
     }
 
     private fun renderFrame() {
+        val now = System.nanoTime()
+        val pts = if (now <= lastPtsNs) lastPtsNs + 1000 else now
+        lastPtsNs = pts
         egl.makeNothingCurrent()
         if (cameraFrameAvailable) {
             cameraFrameAvailable = false
@@ -317,13 +340,17 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
             }
         }
         GLES20.glDisable(GLES20.GL_BLEND)
+        if (syncTest) {
+            val sec = pts / 1_000_000_000L
+            val flash = sec != lastFlashSec
+            lastFlashSec = sec
+            tex2d.draw(if (flash) whiteTex else blackTex, QuadRenderer.IDENTITY,
+                rectCorners(0f, 0f, canvasWidth / 8f, canvasHeight / 8f), 1f)
+        }
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         renderedFrames++
 
         // ---- 2. 输出到编码器 ----
-        val now = System.nanoTime()
-        val pts = if (now <= lastPtsNs) lastPtsNs + 1000 else now
-        lastPtsNs = pts
         encoderSurface?.let { s ->
             egl.makeCurrent(s)
             GLES20.glViewport(0, 0, canvasWidth, canvasHeight)
