@@ -64,6 +64,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import app.livecomposer.core.Layer
 import app.livecomposer.core.LayerType
+import app.livecomposer.source.PlayerSource
 import app.livecomposer.engine.EngineState
 import app.livecomposer.source.WebOverlaySource
 import kotlin.math.abs
@@ -89,6 +90,7 @@ class StageActions(
     val onLower: (String) -> Unit,
     val onDelete: (String) -> Unit,
     val onReloadWeb: () -> Unit,
+    val onReloadMedia: (String) -> Unit,
 )
 
 /**
@@ -246,7 +248,8 @@ fun Stage(
                         current?.let { act.onLayerChange(it, true) }
                         if (!moved && !multi && !longFired) {
                             // 单击：未选中 → 对焦；已选中 → 点其他图层切换，点自身或空白取消选择
-                            val hit = layers.lastOrNull { it.visible && inside(it, p0, 0f) }
+                            // （摄像头图层通常铺满画面，单击不切换到它，避免“点空白”变成选中摄像头；长按或列表可选中）
+                            val hit = layers.lastOrNull { it.visible && it.type != LayerType.CAMERA && inside(it, p0, 0f) }
                             if (selected == null) {
                                 act.onFocus(p0.x, p0.y)
                                 focusPoint = Offset(p0.x / s, p0.y / s)
@@ -332,7 +335,7 @@ fun Stage(
                         SmallIconButton(Icons.Rounded.VisibilityOff, "隐藏", { actions.onLayerChange(s.copy(visible = false), true); actions.onSelect(null) })
                         SmallIconButton(if (s.locked) Icons.Rounded.Lock else Icons.Rounded.LockOpen, "锁定",
                             { actions.onLayerChange(s.copy(locked = !s.locked), true) }, tint = if (s.locked) Studio.Warn else Studio.TextDim)
-                        SmallIconButton(Icons.Rounded.Delete, "删除", { actions.onDelete(s.id) }, tint = Studio.Live)
+                        if (s.type != LayerType.CAMERA) SmallIconButton(Icons.Rounded.Delete, "删除", { actions.onDelete(s.id) }, tint = Studio.Live)
                     }
                 }
             }
@@ -352,6 +355,29 @@ fun Stage(
                         modifier = Modifier.offset { IntOffset(bx.roundToInt(), by.roundToInt()) }.widthIn(max = 260.dp)
                             .clip(RoundedCornerShape(8.dp)).background(badge.second.copy(alpha = 0.9f))
                             .clickable(enabled = state.webState != WebOverlaySource.LoadState.LOADING) { actions.onReloadWeb() }
+                            .padding(horizontal = 8.dp, vertical = 4.dp))
+                }
+            }
+
+            // ---------------- 媒体图层状态角标（仅界面） ----------------
+            state.layers.filter { it.type == LayerType.MEDIA && it.visible }.forEach { m ->
+                val ms = state.media[m.id]
+                val badge: Pair<String, Color>? = when (ms?.state) {
+                    null -> null
+                    PlayerSource.State.CONNECTING -> "${m.name} 连接中…" to Studio.Warn
+                    PlayerSource.State.BUFFERING -> "${m.name} 缓冲中…" to Studio.Warn
+                    PlayerSource.State.RECONNECTING -> "${m.name} ${ms?.message ?: "重连中"}" to Studio.Warn
+                    PlayerSource.State.ERROR -> "${m.name} ${ms?.message ?: "播放失败"} · 点击重试" to Studio.Live
+                    PlayerSource.State.ENDED -> "${m.name} 已播完 · 点击重播" to Studio.TextDim
+                    else -> null
+                }
+                if (badge != null) {
+                    val bx = (m.x * toView).coerceIn(0f, fitW * 0.6f) + with(density) { 8.dp.toPx() }
+                    val by = (m.y * toView).coerceIn(0f, fitH * 0.8f) + with(density) { 8.dp.toPx() }
+                    Text(badge.first, color = Color.White, fontSize = 11.sp,
+                        modifier = Modifier.offset { IntOffset(bx.roundToInt(), by.roundToInt()) }.widthIn(max = 260.dp)
+                            .clip(RoundedCornerShape(8.dp)).background(badge.second.copy(alpha = 0.9f))
+                            .clickable { actions.onReloadMedia(m.id) }
                             .padding(horizontal = 8.dp, vertical = 4.dp))
                 }
             }

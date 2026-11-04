@@ -12,8 +12,8 @@ android {
         applicationId = "app.livecomposer"
         minSdk = 29          // Android 10 及以上
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
     }
 
     buildTypes {
@@ -47,4 +47,10 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
+    // 媒体图层：拉流（HLS / RTSP / RTMP / HTTP-FLV / MP4）与本地视频
+    val media3 = "1.4.1"
+    implementation("androidx.media3:media3-exoplayer:$media3")
+    implementation("androidx.media3:media3-exoplayer-hls:$media3")
+    implementation("androidx.media3:media3-exoplayer-rtsp:$media3")
+    implementation("androidx.media3:media3-datasource-rtmp:$media3")
 }

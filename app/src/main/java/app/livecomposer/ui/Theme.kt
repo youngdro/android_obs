@@ -28,6 +28,8 @@ object Studio {
     val Web = Color(0xFF3DDCFF)
     val Image = Color(0xFFB388FF)
     val TextLayer = Color(0xFFFFB020)
+    val Camera = Color(0xFF34D399)
+    val Media = Color(0xFFFF7AC6)
     val Scrim = Color(0xB3000000)
     val Glass = Color(0xCC15171D)
 }

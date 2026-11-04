@@ -36,13 +36,17 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Language
+import androidx.compose.material.icons.rounded.LiveTv
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.TextFields
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material.icons.rounded.VolumeOff
+import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -65,6 +69,7 @@ import androidx.compose.ui.unit.sp
 import app.livecomposer.core.Layer
 import app.livecomposer.core.LayerType
 import app.livecomposer.engine.EngineState
+import app.livecomposer.source.PlayerSource
 import app.livecomposer.source.WebOverlaySource
 
 /** 侧边/底部面板外壳。 */
@@ -83,12 +88,16 @@ fun PanelShell(title: String, onClose: () -> Unit, modifier: Modifier = Modifier
 }
 
 fun layerIcon(t: LayerType): ImageVector = when (t) {
+    LayerType.CAMERA -> Icons.Rounded.Videocam
+    LayerType.MEDIA -> Icons.Rounded.LiveTv
     LayerType.WEB -> Icons.Rounded.Language
     LayerType.IMAGE -> Icons.Rounded.Image
     LayerType.TEXT -> Icons.Rounded.TextFields
 }
 
 fun layerColor(t: LayerType): Color = when (t) {
+    LayerType.CAMERA -> Studio.Camera
+    LayerType.MEDIA -> Studio.Media
     LayerType.WEB -> Studio.Web
     LayerType.IMAGE -> Studio.Image
     LayerType.TEXT -> Studio.TextLayer
@@ -150,6 +159,12 @@ fun LayersPanel(
 }
 
 private fun layerSubtitle(l: Layer, s: EngineState): String = when (l.type) {
+    LayerType.CAMERA -> "后置主摄 · 麦克风 ${if (s.muted) "已静音" else "${(l.volume * 100).toInt()}%"}"
+    LayerType.MEDIA -> buildString {
+        append(s.media[l.id]?.state?.label ?: "未开始")
+        append(" · 音量 ${(l.volume * 100).toInt()}% · ")
+        append(if (l.mediaLive) l.mediaUri.substringAfter("://") else "本地视频")
+    }
     LayerType.WEB -> buildString {
         append(s.webState.label)
         append(" · 视口 ${l.viewportW}×${l.viewportH}")
@@ -172,6 +187,8 @@ fun InspectorPanel(
     onFitText: (String) -> Unit,
     onWeb: (url: String, vw: Int, vh: Int) -> Unit,
     onReloadWeb: () -> Unit,
+    onMedia: (id: String, uri: String, loop: Boolean) -> Unit,
+    onReloadMedia: (String) -> Unit,
     onRaise: () -> Unit,
     onLower: () -> Unit,
     onDelete: () -> Unit,
@@ -189,9 +206,11 @@ fun InspectorPanel(
             SmallIconButton(if (layer.visible) Icons.Rounded.Visibility else Icons.Rounded.VisibilityOff, "显示/隐藏", { onUpdate(layer.copy(visible = !layer.visible)) })
             SmallIconButton(if (layer.locked) Icons.Rounded.Lock else Icons.Rounded.LockOpen, "锁定", { onUpdate(layer.copy(locked = !layer.locked)) },
                 tint = if (layer.locked) Studio.Warn else Studio.TextDim)
-            SmallIconButton(Icons.Rounded.Delete, "删除", onDelete, tint = Studio.Live)
+            if (layer.type != LayerType.CAMERA) SmallIconButton(Icons.Rounded.Delete, "删除", onDelete, tint = Studio.Live)
         }
 
+        if (layer.type == LayerType.MEDIA) MediaSection(state, layer, onMedia, onReloadMedia)
+        if (layer.type.hasAudio) AudioSection(state, layer, onUpdate)
         if (layer.type == LayerType.WEB) WebSection(state, layer, onWeb, onReloadWeb)
         if (layer.type == LayerType.TEXT) TextSection(layer, onUpdate, onFitText)
 
@@ -246,6 +265,12 @@ fun InspectorPanel(
                     colors = SliderDefaults.colors(thumbColor = Studio.Accent, activeTrackColor = Studio.Accent))
                 Text("${(op * 100).toInt()}%", style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(44.dp))
             }
+            if (layer.type == LayerType.CAMERA) {
+                Text("摄像头画面等比铺满图层框，超出部分裁掉；拖动角手柄可做画中画。", style = MaterialTheme.typography.bodySmall)
+            }
+            if (layer.type == LayerType.MEDIA) {
+                Text("视频画面等比放进图层框，空出的部分透明。", style = MaterialTheme.typography.bodySmall)
+            }
             if (layer.type == LayerType.WEB) {
                 Text("透明背景由网页自身决定；默认 100%，不要用降低整体不透明度来模拟透明。", style = MaterialTheme.typography.bodySmall)
             }
@@ -296,6 +321,73 @@ private fun WebSection(state: EngineState, layer: Layer, onWeb: (String, Int, In
     }
 }
 
+/** 声音：音量（0~200%）与实时电平。 */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AudioSection(state: EngineState, layer: Layer, onUpdate: (Layer) -> Unit) {
+    Section("声音") {
+        val level = state.audioLevels[layer.id] ?: 0f
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(if (layer.volume <= 0f) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp, null,
+                tint = if (layer.volume <= 0f) Studio.Live else Studio.TextDim, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(8.dp))
+            var vol by remember(layer.id) { mutableStateOf(layer.volume) }
+            Slider(vol, { vol = (it * 20).toInt() / 20f }, Modifier.weight(1f), valueRange = 0f..2f,
+                onValueChangeFinished = { onUpdate(layer.copy(volume = vol)) },
+                colors = SliderDefaults.colors(thumbColor = Studio.Accent, activeTrackColor = Studio.Accent))
+            Text("${(vol * 100).toInt()}%", style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(48.dp).padding(start = 6.dp))
+        }
+        // 电平条
+        Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(Studio.SurfaceHigher)) {
+            Box(Modifier.fillMaxWidth(level.coerceIn(0f, 1f)).height(6.dp).clip(RoundedCornerShape(3.dp))
+                .background(if (level > 0.9f) Studio.Live else Studio.Ok))
+        }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(0f to "静音", 0.5f to "50%", 1f to "100%", 1.5f to "150%").forEach { (v, label) ->
+                Chip(label, layer.volume == v, { onUpdate(layer.copy(volume = v)) })
+            }
+        }
+        Text(
+            if (layer.type == LayerType.CAMERA) "摄像头图层的声音来自麦克风；工具栏的麦克风按钮是一键静音。"
+            else "声音只混进直播，不从手机扬声器外放（避免被麦克风再次收音形成回声）。",
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
+/** 拉流 / 本地视频。 */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun MediaSection(state: EngineState, layer: Layer, onMedia: (String, String, Boolean) -> Unit, onReload: (String) -> Unit) {
+    Section(if (layer.mediaLive) "拉流" else "本地视频", trailing = {
+        Text("重新连接", color = Studio.Accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { onReload(layer.id) }.padding(horizontal = 8.dp, vertical = 2.dp))
+    }) {
+        val ms = state.media[layer.id]
+        val color = when (ms?.state) {
+            PlayerSource.State.PLAYING -> Studio.Ok
+            PlayerSource.State.ERROR -> Studio.Live
+            null, PlayerSource.State.IDLE, PlayerSource.State.ENDED -> Studio.TextDim
+            else -> Studio.Warn
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(8.dp).clip(CircleShape).background(color))
+            Spacer(Modifier.width(8.dp))
+            Text(buildString {
+                append(ms?.state?.label ?: "未开始")
+                if (ms != null && ms.videoW > 0) append(" · ${ms.videoW}×${ms.videoH}")
+                ms?.message?.let { append(" · ").append(it) }
+            }, style = MaterialTheme.typography.bodySmall, color = color)
+        }
+        if (layer.mediaLive) {
+            Field("拉流地址", layer.mediaUri, { onMedia(layer.id, it, layer.loop) }, placeholder = "https://….m3u8 / rtmp:// / rtsp:// / http://….flv")
+            Text("支持 HLS（.m3u8）、RTMP、RTSP、HTTP-FLV、HTTP MP4。断线后按 1、2、5、10 秒自动重连。", style = MaterialTheme.typography.bodySmall)
+        } else {
+            SwitchRow("循环播放", "播完自动从头开始", layer.loop, { onMedia(layer.id, layer.mediaUri, it) })
+        }
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TextSection(layer: Layer, onUpdate: (Layer) -> Unit, onFit: (String) -> Unit) {
@@ -330,6 +422,8 @@ private fun TextSection(layer: Layer, onUpdate: (Layer) -> Unit, onFit: (String)
 @Composable
 fun AddPanel(
     state: EngineState,
+    onAddStream: (String) -> Unit,
+    onPickVideo: () -> Unit,
     onAddWeb: (String) -> Unit,
     onPickImage: () -> Unit,
     onAddText: (String) -> Unit,
@@ -339,7 +433,19 @@ fun AddPanel(
     var url by remember { mutableStateOf("") }
     var text by remember { mutableStateOf("直播合成 LiveComposer") }
     val hasWeb = state.layers.any { it.type == LayerType.WEB }
+    var pull by remember { mutableStateOf("") }
+    val mediaCount = state.layers.count { it.type == LayerType.MEDIA }
+    val mediaFull = mediaCount >= MAX_MEDIA_LAYERS
     PanelShell("添加来源", onClose, modifier) {
+        SourceCard(LayerType.MEDIA, "拉流地址", if (mediaFull) "最多 $MAX_MEDIA_LAYERS 路媒体，已满" else "HLS / RTMP / RTSP / HTTP-FLV / MP4，画面和声音一起合进直播") {
+            if (!mediaFull) {
+                Field("拉流地址", pull, { pull = it }, placeholder = "https://…/live.m3u8", onChange = { pull = it })
+                Chip("添加", pull.isNotBlank(), { if (pull.isNotBlank()) onAddStream(pull) }, enabled = pull.isNotBlank())
+            }
+        }
+        SourceCard(LayerType.MEDIA, "本地视频", if (mediaFull) "最多 $MAX_MEDIA_LAYERS 路媒体，已满" else "手机里的视频文件，默认循环播放") {
+            if (!mediaFull) Chip("从相册 / 文件选择", false, onPickVideo)
+        }
         SourceCard(LayerType.WEB, "网页", if (hasWeb) "首版支持一个网页图层，已存在" else "透明背景网页：文字、图片、动画、实时数据") {
             if (!hasWeb) {
                 Field("网页地址", url, { url = it }, placeholder = "https://…", onChange = { url = it })
@@ -377,6 +483,9 @@ private fun SourceCard(type: LayerType, title: String, desc: String, content: @C
         content()
     }
 }
+
+/** 与 StudioEngine.MAX_MEDIA 保持一致。 */
+const val MAX_MEDIA_LAYERS = 3
 
 @Composable
 fun EmptyFill() { Spacer(Modifier.fillMaxSize()) }

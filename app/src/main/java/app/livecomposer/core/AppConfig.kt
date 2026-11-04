@@ -19,7 +19,12 @@ enum class Resolution(val label: String, val long: Int, val short: Int) {
     P720("720p", 1280, 720), P1080("1080p", 1920, 1080)
 }
 
-enum class LayerType(val label: String) { WEB("网页"), IMAGE("图片"), TEXT("文字") }
+enum class LayerType(val label: String) {
+    CAMERA("摄像头"), WEB("网页"), MEDIA("媒体"), IMAGE("图片"), TEXT("文字");
+
+    /** 有声音、可调音量的图层。 */
+    val hasAudio get() = this == CAMERA || this == MEDIA
+}
 
 /** 图层。位置/尺寸为画布像素坐标（左上角原点）。网页图层的渲染视口（CSS 像素）与其在画布中的显示尺寸相互独立。 */
 data class Layer(
@@ -40,6 +45,13 @@ data class Layer(
     var text: String = "",
     var textSizePx: Float = 64f,
     var textColor: Int = 0xFFFFFFFF.toInt(),
+    // 媒体（拉流地址或本地视频）
+    var mediaUri: String = "",
+    /** true = 拉流地址（直播流，断线自动重连）；false = 本地视频文件（循环播放）。 */
+    var mediaLive: Boolean = true,
+    var loop: Boolean = true,
+    // 声音：摄像头图层 = 麦克风音量；媒体图层 = 该源音量。0..2（1 = 原始音量）
+    var volume: Float = 1f,
 ) {
     fun toJson() = JSONObject().apply {
         put("id", id); put("type", type.name); put("name", name)
@@ -47,6 +59,7 @@ data class Layer(
         put("visible", visible); put("locked", locked); put("opacity", opacity.toDouble())
         put("url", url); put("viewportW", viewportW); put("viewportH", viewportH)
         put("imageUri", imageUri); put("text", text); put("textSizePx", textSizePx.toDouble()); put("textColor", textColor)
+        put("mediaUri", mediaUri); put("mediaLive", mediaLive); put("loop", loop); put("volume", volume.toDouble())
     }
 
     companion object {
@@ -59,6 +72,8 @@ data class Layer(
             url = o.optString("url"), viewportW = o.optInt("viewportW", 1920), viewportH = o.optInt("viewportH", 1080),
             imageUri = o.optString("imageUri"), text = o.optString("text"),
             textSizePx = o.optDouble("textSizePx", 64.0).toFloat(), textColor = o.optInt("textColor", -1),
+            mediaUri = o.optString("mediaUri"), mediaLive = o.optBoolean("mediaLive", true),
+            loop = o.optBoolean("loop", true), volume = o.optDouble("volume", 1.0).toFloat(),
         )
     }
 }
@@ -91,7 +106,7 @@ data class AppConfig(
         fun load(ctx: Context): AppConfig {
             val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val c = AppConfig()
-            val json = p.getString("json", null) ?: return c.withDefaults()
+            val json = p.getString("json", null) ?: return c.withDefaults(firstRun = true)
             try {
                 val o = JSONObject(json)
                 c.orientation = CanvasOrientation.valueOf(o.optString("orientation", c.orientation.name))
@@ -113,7 +128,7 @@ data class AppConfig(
             // 完整 URL 中也包含密钥，同样加密保存
             c.fullUrl = decrypt(p.getString("fullUrlEnc", null)) ?: ""
             c.streamKey = decrypt(p.getString("streamKeyEnc", null)) ?: ""
-            return c.withDefaults()
+            return c.withDefaults(firstRun = false)
         }
 
         private fun decrypt(s: String?): String? {
@@ -148,8 +163,14 @@ data class AppConfig(
         }
     }
 
-    private fun withDefaults(): AppConfig {
-        if (layers.none { it.type == LayerType.WEB }) {
+    private fun withDefaults(firstRun: Boolean): AppConfig {
+        // 摄像头是唯一的、不可删除的图层（可隐藏）；老版本配置里没有它时补到最底层并铺满
+        if (layers.none { it.type == LayerType.CAMERA }) {
+            layers.add(0, Layer(type = LayerType.CAMERA, name = "后置摄像头", x = 0f, y = 0f,
+                w = canvasWidth.toFloat(), h = canvasHeight.toFloat()))
+        }
+        // 首次运行放一个测试网页图层；之后用户删掉就不再自动加回
+        if (firstRun && layers.none { it.type == LayerType.WEB }) {
             layers.add(Layer(type = LayerType.WEB, name = "网页图层", x = 0f, y = 0f,
                 w = canvasWidth.toFloat(), h = canvasHeight.toFloat(),
                 url = "file:///android_asset/testpage/index.html",
