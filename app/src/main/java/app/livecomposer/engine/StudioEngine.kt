@@ -1,0 +1,603 @@
+package app.livecomposer.engine
+
+import android.app.Activity
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.SurfaceTexture
+import android.graphics.Typeface
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.Uri
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.view.MotionEvent
+import android.view.Surface
+import android.view.ViewGroup
+import app.livecomposer.core.AppConfig
+import app.livecomposer.core.CanvasOrientation
+import app.livecomposer.core.Layer
+import app.livecomposer.core.LayerType
+import app.livecomposer.core.Resolution
+import app.livecomposer.encode.AudioPipeline
+import app.livecomposer.encode.VideoEncoder
+import app.livecomposer.gl.Compositor
+import app.livecomposer.rtmp.RtmpPublisher
+import app.livecomposer.rtmp.RtmpUrl
+import app.livecomposer.rtmp.RtmpUrlException
+import app.livecomposer.source.CameraSource
+import app.livecomposer.source.WebOverlaySource
+import app.livecomposer.stream.DeviceMetrics
+import app.livecomposer.stream.RunLogger
+import app.livecomposer.stream.StreamController
+
+/** 直播状态（界面用）。 */
+enum class LiveState { IDLE, CONNECTING, LIVE, RECONNECTING, FAILED }
+
+/** 引擎对外的只读快照。界面层只读它，所有修改都通过 StudioEngine 的方法。 */
+data class EngineState(
+    val canvasWidth: Int,
+    val canvasHeight: Int,
+    val orientation: CanvasOrientation,
+    val resolution: Resolution,
+    val fps: Int,
+    val videoBitrateKbps: Int,
+    val keyFrameIntervalSec: Int,
+    val layers: List<Layer>,
+    val live: LiveState,
+    val durationSec: Long,
+    val outFps: Float,
+    val bitrateKbps: Float,
+    val droppedFrames: Long,
+    val reconnects: Int,
+    val streamMessage: String?,
+    val cameraMessage: String?,
+    val micMessage: String?,
+    val micLevel: Float,
+    val muted: Boolean,
+    val webState: WebOverlaySource.LoadState,
+    val webMessage: String?,
+    val webViewport: String?,
+    val renderFps: Int,
+    val webFps: Int,
+    val webCaptureMs: Double,
+    val metrics: DeviceMetrics.Sample?,
+    val zoom: Float,
+    val zoomMin: Float,
+    val zoomMax: Float,
+    val syncTest: Boolean,
+    val webGpu: Boolean,
+    val allowCleartext: Boolean,
+    val cameraRotationFix: Int,
+    val useFullUrl: Boolean,
+    val fullUrl: String,
+    val serverUrl: String,
+    val streamKey: String,
+    val availableResolutions: List<Resolution>,
+    val cameraSizes: String,
+    val notice: String?,
+) {
+    val isStreaming: Boolean get() = live != LiveState.IDLE && live != LiveState.FAILED
+}
+
+/**
+ * 直播引擎：持有摄像头、网页、合成器、编码与推流，和界面完全解耦。
+ * 所有方法在主线程调用；状态变化通过 [onChanged] 通知（主线程）。
+ */
+class StudioEngine(private val activity: Activity, private val webParent: ViewGroup) {
+
+    var onChanged: (() -> Unit)? = null
+
+    val config: AppConfig = AppConfig.load(activity)
+    private val main = Handler(Looper.getMainLooper())
+    private val metricsSampler = DeviceMetrics(activity)
+    private val runLogger = RunLogger(activity)
+
+    private var ready = false
+    private lateinit var compositor: Compositor
+    private lateinit var camera: CameraSource
+    private lateinit var audio: AudioPipeline
+    private lateinit var stream: StreamController
+    private var web: WebOverlaySource? = null
+    private var webOutputVisible = false
+    private var cameraTexture: SurfaceTexture? = null
+    private var started = false
+
+    // 运行状态
+    private var stats: StreamController.Stats? = null
+    private var streamActive = false
+    private var streamEndMessage: String? = null
+    private var cameraMessage: String? = null
+    private var micMessage: String? = null
+    private var micLevel = 0f
+    private var webState = WebOverlaySource.LoadState.IDLE
+    private var webMessage: String? = null
+    private var webViewport: String? = null
+    private var renderFps = 0
+    private var webFps = 0
+    private var metrics: DeviceMetrics.Sample? = null
+    private var syncTest = false
+    private var notice: String? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private val bitmapKeys = HashMap<String, String>()
+
+    private var cachedResolutions: List<Resolution>? = null
+
+    // ------------------------------------------------------------------ 状态快照
+
+    fun snapshot(): EngineState {
+        val st = stats
+        val live = when {
+            !streamActive -> if (streamEndMessage != null && stats == null && lastFailed) LiveState.FAILED else LiveState.IDLE
+            st == null -> LiveState.CONNECTING
+            else -> when (st.state) {
+                RtmpPublisher.State.LIVE -> LiveState.LIVE
+                RtmpPublisher.State.RECONNECTING -> LiveState.RECONNECTING
+                RtmpPublisher.State.FAILED -> LiveState.FAILED
+                else -> LiveState.CONNECTING
+            }
+        }
+        return EngineState(
+            canvasWidth = config.canvasWidth, canvasHeight = config.canvasHeight,
+            orientation = config.orientation, resolution = config.resolution, fps = config.fps,
+            videoBitrateKbps = config.videoBitrateKbps, keyFrameIntervalSec = config.keyFrameIntervalSec,
+            layers = config.layers.map { it.copy() },
+            live = live,
+            durationSec = st?.durationSec ?: 0, outFps = st?.outputFps ?: 0f, bitrateKbps = st?.bitrateKbps ?: 0f,
+            droppedFrames = st?.droppedFrames ?: 0, reconnects = st?.reconnects ?: 0,
+            streamMessage = if (streamActive) st?.message else streamEndMessage,
+            cameraMessage = cameraMessage, micMessage = micMessage, micLevel = micLevel, muted = config.micMuted,
+            webState = webState, webMessage = webMessage, webViewport = webViewport,
+            renderFps = renderFps, webFps = webFps, webCaptureMs = web?.lastCaptureMs ?: 0.0, metrics = metrics,
+            zoom = config.zoom,
+            zoomMin = if (ready) camera.zoomRange.lower else 1f, zoomMax = if (ready) camera.zoomRange.upper else 1f,
+            syncTest = syncTest, webGpu = config.webCaptureGpu, allowCleartext = config.allowCleartextWeb,
+            cameraRotationFix = config.cameraRotationFix,
+            useFullUrl = config.useFullUrl, fullUrl = config.fullUrl, serverUrl = config.serverUrl, streamKey = config.streamKey,
+            availableResolutions = availableResolutions(),
+            cameraSizes = if (ready) camera.outputSizes.take(6).joinToString { "${it.width}×${it.height}" } else "",
+            notice = notice,
+        )
+    }
+
+    private var lastFailed = false
+
+    private fun changed() { onChanged?.invoke() }
+
+    private fun availableResolutions(): List<Resolution> {
+        cachedResolutions?.let { return it }
+        val list = Resolution.values().filter {
+            VideoEncoder.supports(it.long, it.short, 30) || VideoEncoder.supports(it.short, it.long, 30)
+        }.ifEmpty { listOf(Resolution.P720) }
+        cachedResolutions = list
+        return list
+    }
+
+    fun consumeNotice() { notice = null; changed() }
+    fun notify(msg: String) { notice = msg; changed() }
+
+    // ------------------------------------------------------------------ 生命周期
+
+    /** 权限已授予后调用一次。 */
+    fun init(previewSurface: Surface?, pw: Int, ph: Int) {
+        if (ready) return
+        ready = true
+        compositor = Compositor(config.canvasWidth, config.canvasHeight, config.fps)
+        camera = CameraSource(activity, object : CameraSource.Listener {
+            override fun onCameraState(state: CameraSource.State, message: String?) {
+                main.post { cameraMessage = message; changed() }
+            }
+        })
+        audio = AudioPipeline(
+            onLevel = { lv -> main.post { micLevel = lv; changed() } },
+            onError = { msg -> main.post { micMessage = msg; changed() } },
+        )
+        audio.muted = config.micMuted
+        stream = StreamController(compositor, audio, object : StreamController.Listener {
+            override fun onStats(stats: StreamController.Stats) {
+                this@StudioEngine.stats = stats
+                if (stats.durationSec % 5 == 0L) logRow(stats)
+                changed()
+            }
+
+            override fun onStreamEnded(error: String?) {
+                lastFailed = error != null
+                streamActive = false
+                stats = null
+                streamEndMessage = error
+                runLogger.finish()?.let { notify("运行日志已保存到 $it") }
+                changed()
+            }
+        })
+        compositor.start { st -> main.post { cameraTexture = st; if (started) openCamera() } }
+        if (previewSurface != null) compositor.setPreviewSurface(previewSurface, pw, ph)
+        setupWebLayer()
+        pushScene()
+        registerNetworkCallback()
+        main.post(perfTick)
+        changed()
+    }
+
+    fun onStart() {
+        started = true
+        if (!ready) return
+        openCamera()
+        micMessage = null
+        audio.startCapture()
+        changed()
+    }
+
+    /** 首版：切后台 / 锁屏即停止推流并释放采集设备。返回是否因此停止了直播。 */
+    fun onStop(): Boolean {
+        started = false
+        if (!ready) return false
+        var stopped = false
+        if (stream.isActive) { stream.stop("应用进入后台，推流已自动停止"); stopped = true }
+        camera.close()
+        audio.stopCapture()
+        config.save(activity)
+        return stopped
+    }
+
+    fun release() {
+        if (!ready) return
+        main.removeCallbacks(perfTick)
+        networkCallback?.let {
+            try { activity.getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(it) } catch (_: Exception) {}
+        }
+        stream.stop()
+        web?.release()
+        camera.release()
+        audio.stopCapture()
+        compositor.release()
+        ready = false
+    }
+
+    fun setPreviewSurface(surface: Surface?, w: Int, h: Int) {
+        if (ready) compositor.setPreviewSurface(surface, w, h)
+    }
+
+    /** 屏幕方向变化后（Activity 不重建）重新计算摄像头旋转。 */
+    fun onDisplayRotationChanged() { if (ready && started) openCamera() }
+
+    // ------------------------------------------------------------------ 摄像头
+
+    private fun openCamera() {
+        val st = cameraTexture ?: return
+        val size = camera.chooseSize(config.resolution.long, config.resolution.short)
+        compositor.setCameraGeometry(size.width, size.height, camera.sensorOrientation, cameraRotation())
+        camera.open(st, size)
+        camera.setZoom(config.zoom)
+    }
+
+    private fun cameraRotation(): Int {
+        @Suppress("DEPRECATION")
+        val r = when (activity.windowManager.defaultDisplay.rotation) {
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+        return (r + config.cameraRotationFix) % 360
+    }
+
+    fun focusAt(canvasX: Float, canvasY: Float) {
+        if (!ready) return
+        compositor.canvasToCameraUv(canvasX, canvasY)?.let { (u, v) -> camera.focusAt(u, v) }
+    }
+
+    fun setZoom(z: Float) {
+        if (!ready) return
+        config.zoom = z.coerceIn(camera.zoomRange.lower, camera.zoomRange.upper)
+        camera.setZoom(config.zoom)
+        changed()
+    }
+
+    fun retryCapture() {
+        if (!ready) return
+        cameraMessage = null; micMessage = null
+        camera.retry()
+        audio.stopCapture(); audio.startCapture()
+        if (webState == WebOverlaySource.LoadState.CRASHED || webState == WebOverlaySource.LoadState.ERROR) reloadWeb()
+        changed()
+    }
+
+    // ------------------------------------------------------------------ 图层
+
+    fun webLayer(): Layer? = config.layers.firstOrNull { it.type == LayerType.WEB }
+
+    private fun setupWebLayer() {
+        web?.release(); web = null
+        webOutputVisible = false
+        val l = webLayer() ?: run { webState = WebOverlaySource.LoadState.IDLE; return }
+        compositor.releaseExternalSurface(l.id)
+        val src = WebOverlaySource(activity, webParent, l.viewportW, l.viewportH, config.webCaptureGpu,
+            config.allowCleartextWeb, config.fps, object : WebOverlaySource.Listener {
+                override fun onLoadStateChanged(state: WebOverlaySource.LoadState, message: String?) {
+                    webState = state; webMessage = message; changed()
+                }
+                override fun onOutputVisibilityChanged(visible: Boolean) { webOutputVisible = visible; pushScene() }
+                override fun onViewportMeasured(cssWidth: Int, cssHeight: Int, dpr: Float) {
+                    webViewport = "${cssWidth}×$cssHeight"; changed()
+                }
+            })
+        web = src
+        compositor.createExternalSurface(l.id, l.viewportW, l.viewportH) { surface ->
+            main.post {
+                if (web !== src) return@post
+                src.attach(surface)
+                if (l.url.isNotBlank()) src.load(l.url)
+            }
+        }
+    }
+
+    fun reloadWeb() { if (web == null) setupWebLayer() else web?.reload() }
+
+    /** 修改网页 URL / 渲染视口。视口变化需要重建网页。 */
+    fun updateWeb(url: String, viewportW: Int, viewportH: Int) {
+        val l = webLayer() ?: return
+        val vpChanged = viewportW != l.viewportW || viewportH != l.viewportH
+        l.url = url.trim(); l.viewportW = viewportW; l.viewportH = viewportH
+        config.save(activity)
+        if (!ready) return
+        if (vpChanged || web == null) setupWebLayer() else web?.load(l.url)
+        changed()
+    }
+
+    /** 图层变换/属性修改（直播中可用）。persist=false 用于拖动过程中的高频更新。 */
+    fun updateLayer(updated: Layer, persist: Boolean = true) {
+        val l = config.layers.firstOrNull { it.id == updated.id } ?: return
+        l.name = updated.name; l.x = updated.x; l.y = updated.y; l.w = updated.w; l.h = updated.h
+        l.visible = updated.visible; l.locked = updated.locked; l.opacity = updated.opacity
+        l.text = updated.text; l.textSizePx = updated.textSizePx; l.textColor = updated.textColor
+        pushScene()
+        if (persist) config.save(activity)
+        changed()
+    }
+
+    fun moveLayer(id: String, toIndex: Int) {
+        val i = config.layers.indexOfFirst { it.id == id }
+        if (i < 0) return
+        val l = config.layers.removeAt(i)
+        config.layers.add(toIndex.coerceIn(0, config.layers.size), l)
+        pushScene(); config.save(activity); changed()
+    }
+
+    fun deleteLayer(id: String) {
+        val l = config.layers.firstOrNull { it.id == id } ?: return
+        config.layers.remove(l)
+        if (l.type == LayerType.WEB) {
+            web?.release(); web = null; webOutputVisible = false
+            webState = WebOverlaySource.LoadState.IDLE; webMessage = null; webViewport = null
+            if (ready) compositor.releaseExternalSurface(l.id)
+        } else if (ready) {
+            compositor.removeBitmap(l.id); bitmapKeys.remove(l.id)
+        }
+        pushScene(); config.save(activity); changed()
+    }
+
+    fun addWebLayer(url: String): Layer? {
+        if (webLayer() != null) { notify("首版只支持一个网页图层"); return null }
+        val l = Layer(type = LayerType.WEB, name = "网页", x = 0f, y = 0f,
+            w = config.canvasWidth.toFloat(), h = config.canvasHeight.toFloat(),
+            url = url, viewportW = config.canvasWidth, viewportH = config.canvasHeight)
+        config.layers.add(l)
+        config.save(activity)
+        if (ready) setupWebLayer()
+        pushScene(); changed()
+        return l
+    }
+
+    fun addImageLayer(uri: Uri): Layer? {
+        val bmp = loadImage(uri) ?: run { notify("无法读取图片"); return null }
+        val maxW = config.canvasWidth / 3f
+        val scale = minOf(1f, maxW / bmp.width)
+        val n = config.layers.count { it.type == LayerType.IMAGE } + 1
+        val l = Layer(type = LayerType.IMAGE, name = "图片 $n",
+            x = (config.canvasWidth - bmp.width * scale) / 2, y = (config.canvasHeight - bmp.height * scale) / 2,
+            w = bmp.width * scale, h = bmp.height * scale, imageUri = uri.toString())
+        config.layers.add(l)
+        pushScene(); config.save(activity); changed()
+        return l
+    }
+
+    fun addTextLayer(text: String): Layer {
+        val n = config.layers.count { it.type == LayerType.TEXT } + 1
+        val l = Layer(type = LayerType.TEXT, name = "文字 $n", x = 0f, y = 0f, w = 0f, h = 0f,
+            text = text, textSizePx = config.canvasHeight / 14f)
+        val bmp = renderText(l)
+        l.w = bmp.width.toFloat(); l.h = bmp.height.toFloat()
+        l.x = (config.canvasWidth - l.w) / 2; l.y = config.canvasHeight * 0.75f - l.h / 2
+        config.layers.add(l)
+        pushScene(); config.save(activity); changed()
+        return l
+    }
+
+    /** 文字图层改字号后，按新内容尺寸调整显示框（保持中心）。 */
+    fun fitTextLayer(id: String) {
+        val l = config.layers.firstOrNull { it.id == id && it.type == LayerType.TEXT } ?: return
+        val bmp = renderText(l)
+        val cx = l.x + l.w / 2; val cy = l.y + l.h / 2
+        l.w = bmp.width.toFloat(); l.h = bmp.height.toFloat()
+        l.x = cx - l.w / 2; l.y = cy - l.h / 2
+        pushScene(); config.save(activity); changed()
+    }
+
+    private fun pushScene() {
+        if (!ready) return
+        val list = ArrayList<Compositor.RenderLayer>()
+        for (l in config.layers) {
+            if (!l.visible) continue
+            when (l.type) {
+                LayerType.WEB -> if (webOutputVisible) list.add(Compositor.RenderLayer(l.id, Compositor.RenderLayer.Kind.EXTERNAL, l.x, l.y, l.w, l.h, l.opacity))
+                LayerType.IMAGE, LayerType.TEXT -> if (ensureBitmap(l)) list.add(Compositor.RenderLayer(l.id, Compositor.RenderLayer.Kind.BITMAP, l.x, l.y, l.w, l.h, l.opacity))
+            }
+        }
+        compositor.setScene(list)
+    }
+
+    private fun ensureBitmap(l: Layer): Boolean {
+        val key = when (l.type) {
+            LayerType.IMAGE -> "img:${l.imageUri}"
+            LayerType.TEXT -> "txt:${l.text}:${l.textSizePx}:${l.textColor}"
+            else -> return false
+        }
+        if (bitmapKeys[l.id] == key) return true
+        val bmp = when (l.type) {
+            LayerType.IMAGE -> loadImage(Uri.parse(l.imageUri)) ?: return false
+            else -> renderText(l)
+        }
+        bitmapKeys[l.id] = key
+        compositor.setBitmap(l.id, bmp)
+        return true
+    }
+
+    private fun loadImage(uri: Uri): Bitmap? = try {
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        activity.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+        var sample = 1
+        while (maxOf(opts.outWidth, opts.outHeight) / sample > 2048) sample *= 2
+        activity.contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun renderText(l: Layer): Bitmap {
+        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = l.textSizePx; color = l.textColor
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            setShadowLayer(l.textSizePx / 12f, 0f, l.textSizePx / 24f, 0xB0000000.toInt())
+        }
+        val lines = l.text.ifEmpty { " " }.split('\n')
+        val fm = p.fontMetrics
+        val lineH = fm.descent - fm.ascent
+        val pad = l.textSizePx / 6f
+        val w = (lines.maxOf { p.measureText(it) } + pad * 2).toInt().coerceAtLeast(8)
+        val h = (lineH * lines.size + pad * 2).toInt().coerceAtLeast(8)
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        lines.forEachIndexed { i, s -> c.drawText(s, pad, pad - fm.ascent + i * lineH, p) }
+        return bmp
+    }
+
+    /** 网页交互模式：画布坐标的触摸转发给网页。 */
+    fun dispatchWebTouch(ev: MotionEvent, canvasX: Float, canvasY: Float): Boolean {
+        val l = webLayer() ?: return false
+        val src = web ?: return false
+        src.dispatchTouch(ev, (canvasX - l.x) / l.w * l.viewportW, (canvasY - l.y) / l.h * l.viewportH)
+        return true
+    }
+
+    // ------------------------------------------------------------------ 推流
+
+    /** 校验推流地址，返回错误信息（null 表示可用）。 */
+    fun validateUrl(): String? = try {
+        if (config.useFullUrl) RtmpUrl.parse(config.fullUrl) else RtmpUrl.fromServerAndKey(config.serverUrl, config.streamKey)
+        null
+    } catch (e: RtmpUrlException) {
+        e.message
+    }
+
+    fun startStream(): String? {
+        if (!ready) return "正在初始化"
+        if (stream.isActive) return null
+        val url = try {
+            if (config.useFullUrl) RtmpUrl.parse(config.fullUrl) else RtmpUrl.fromServerAndKey(config.serverUrl, config.streamKey)
+        } catch (e: RtmpUrlException) {
+            return e.message
+        }
+        config.save(activity)
+        streamEndMessage = null; lastFailed = false; stats = null
+        runLogger.begin("${config.canvasWidth}x${config.canvasHeight}@${config.fps} ${config.videoBitrateKbps}kbps " +
+            "web=${if (config.webCaptureGpu) "GPU" else "CPU"} ${Build.MANUFACTURER} ${Build.MODEL} Android ${Build.VERSION.RELEASE} ${url.masked()}")
+        streamActive = true
+        stream.start(url, config.canvasWidth, config.canvasHeight, config.fps, config.videoBitrateKbps * 1000, config.keyFrameIntervalSec)
+        if (!stream.isActive) streamActive = false
+        changed()
+        return null
+    }
+
+    fun stopStream() { if (ready) stream.stop() }
+
+    fun toggleMute() {
+        config.micMuted = !config.micMuted
+        if (ready) audio.muted = config.micMuted
+        config.save(activity); changed()
+    }
+
+    // ------------------------------------------------------------------ 设置（非直播时）
+
+    fun applySettings(edit: (AppConfig) -> Unit) {
+        val oldW = config.canvasWidth; val oldH = config.canvasHeight
+        val oldFps = config.fps; val oldGpu = config.webCaptureGpu; val oldHttp = config.allowCleartextWeb
+        val oldRot = config.cameraRotationFix; val oldRes = config.resolution
+        edit(config)
+        val newW = config.canvasWidth; val newH = config.canvasHeight
+        if (oldW != newW || oldH != newH) {
+            for (l in config.layers) {
+                val full = l.x == 0f && l.y == 0f && l.w == oldW.toFloat() && l.h == oldH.toFloat()
+                if (full) {
+                    l.w = newW.toFloat(); l.h = newH.toFloat()
+                    if (l.type == LayerType.WEB) { l.viewportW = newW; l.viewportH = newH }
+                } else {
+                    // 保持中心点的相对位置与尺寸，限制在画布内
+                    val s = minOf(newW.toFloat() / oldW, newH.toFloat() / oldH)
+                    val cx = (l.x + l.w / 2) / oldW * newW; val cy = (l.y + l.h / 2) / oldH * newH
+                    l.w *= s; l.h *= s; l.x = cx - l.w / 2; l.y = cy - l.h / 2
+                }
+            }
+        }
+        config.save(activity)
+        if (!ready) { changed(); return }
+        if (oldW != newW || oldH != newH || oldFps != config.fps) compositor.configure(newW, newH, config.fps)
+        if (oldW != newW || oldH != newH || oldGpu != config.webCaptureGpu || oldHttp != config.allowCleartextWeb || oldFps != config.fps) setupWebLayer()
+        if (oldRes != config.resolution || oldRot != config.cameraRotationFix || oldW != newW) openCamera()
+        pushScene()
+        changed()
+    }
+
+    fun setSyncTest(on: Boolean) {
+        syncTest = on
+        if (ready) { compositor.syncTest = on; audio.syncTest = on }
+        changed()
+    }
+
+    // ------------------------------------------------------------------ 网络 & 性能
+
+    private fun registerNetworkCallback() {
+        val cm = activity.getSystemService(ConnectivityManager::class.java) ?: return
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) { main.post { if (ready) stream.onNetworkAvailable() } }
+            override fun onLost(network: Network) { main.post { if (ready && cm.activeNetwork == null) stream.onNetworkLost() } }
+        }
+        try { cm.registerDefaultNetworkCallback(cb); networkCallback = cb } catch (_: Exception) {}
+    }
+
+    private var lastRendered = 0L
+    private var lastWebFrames = 0L
+    private var perfTicks = 0
+    private val perfTick = object : Runnable {
+        override fun run() {
+            if (!ready) return
+            val r = compositor.renderedFrames
+            val w = web?.captureFrames ?: 0L
+            renderFps = (r - lastRendered).coerceAtLeast(0).toInt()
+            webFps = (w - lastWebFrames).coerceAtLeast(0).toInt()
+            lastRendered = r; lastWebFrames = w
+            if (perfTicks++ % 5 == 0) metrics = try { metricsSampler.sample() } catch (_: Exception) { null }
+            changed()
+            main.postDelayed(this, 1000)
+        }
+    }
+
+    private fun logRow(st: StreamController.Stats) {
+        val m = metrics
+        runLogger.append(listOf(st.durationSec, st.state.name, "%.1f".format(st.outputFps), "%.0f".format(st.bitrateKbps),
+            st.droppedFrames, st.renderLate, st.reconnects, "%.1f".format(web?.lastCaptureMs ?: 0.0), webFps,
+            m?.pssMb ?: 0, m?.javaMb ?: 0, m?.batteryTempC ?: 0f, m?.thermal ?: ""))
+    }
+}
