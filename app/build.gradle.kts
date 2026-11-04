@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
@@ -11,13 +12,14 @@ android {
         applicationId = "app.livecomposer"
         minSdk = 29          // Android 10 及以上
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0-demo"
+        versionCode = 2
+        versionName = "0.2.0"
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
             // 正式发布时替换为自己的签名配置；当前 release 用 debug 签名，便于直接安装验证
             signingConfig = signingConfigs.getByName("debug")
         }
@@ -28,6 +30,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+    buildFeatures { compose = true }
 
     lint {
         abortOnError = false
@@ -35,5 +38,13 @@ android {
     }
 }
 
-// 不依赖任何第三方库：Camera2 / MediaCodec / WebView / OpenGL ES / RTMP 均为系统 API 或项目内实现
-dependencies {}
+// 媒体链路（Camera2 / MediaCodec / WebView / OpenGL ES / RTMP）只用系统 API 与项目内实现；
+// 界面使用 Jetpack Compose（Apache-2.0）。
+dependencies {
+    implementation(platform("androidx.compose:compose-bom:2024.10.01"))
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.foundation:foundation")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
+}

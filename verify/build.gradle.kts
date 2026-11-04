@@ -14,6 +14,8 @@ sourceSets {
     // 2) 整个 App 的编译检查（Android 框架 API 来自 Robolectric 发布在 Maven Central 的 android-all）
     create("androidCheck") {
         kotlin.srcDir("../app/src/main/java")
+        // 界面层使用 Jetpack Compose（AndroidX），由 CI 的 Android 构建负责编译；这里检查引擎层
+        kotlin.exclude("app/livecomposer/ui/**")
     }
 }
 

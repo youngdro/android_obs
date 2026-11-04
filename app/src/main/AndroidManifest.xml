@@ -16,15 +16,15 @@
         android:hardwareAccelerated="true"
         android:label="直播合成"
         android:supportsRtl="false"
-        android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+        android:theme="@android:style/Theme.Material.NoActionBar"
         android:usesCleartextTraffic="true">
 
         <!-- configChanges：切换画布方向时不重建 Activity，摄像头/网页/推流保持运行 -->
         <activity
-            android:name=".MainActivity"
+            android:name=".ui.StudioActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"
             android:exported="true"
-            android:screenOrientation="landscape"
+            android:screenOrientation="sensorLandscape"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
