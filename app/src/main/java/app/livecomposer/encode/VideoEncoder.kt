@@ -143,5 +143,16 @@ class VideoEncoder(
 
     companion object {
         private const val TAG = "VideoEncoder"
+
+        /** 设备 H.264 编码器（优先硬件）是否支持该尺寸与帧率，用于展示可选分辨率。 */
+        fun supports(width: Int, height: Int, fps: Int): Boolean = try {
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any { info ->
+                info.isEncoder && info.supportedTypes.any { it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true) } &&
+                    info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).videoCapabilities
+                        .areSizeAndRateSupported(width, height, fps.toDouble())
+            }
+        } catch (e: Exception) {
+            true
+        }
     }
 }

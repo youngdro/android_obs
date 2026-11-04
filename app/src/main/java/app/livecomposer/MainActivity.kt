@@ -41,7 +41,16 @@ import app.livecomposer.rtmp.RtmpUrl
 import app.livecomposer.rtmp.RtmpUrlException
 import app.livecomposer.source.CameraSource
 import app.livecomposer.source.WebOverlaySource
+import app.livecomposer.stream.DeviceMetrics
+import app.livecomposer.stream.RunLogger
 import app.livecomposer.stream.StreamController
+import app.livecomposer.encode.VideoEncoder
+import android.net.ConnectivityManager
+import android.net.Network
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.view.WindowInsets
 import app.livecomposer.ui.EditOverlayView
 import app.livecomposer.ui.button
 import app.livecomposer.ui.check
@@ -73,6 +82,13 @@ class MainActivity : Activity() {
     private lateinit var statusText: TextView
     private lateinit var webStatusText: TextView
     private lateinit var levelBar: ProgressBar
+    private lateinit var perfText: TextView
+    private lateinit var metrics: DeviceMetrics
+    private lateinit var runLogger: RunLogger
+    private var syncTest = false
+    private var lastMetrics: DeviceMetrics.Sample? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private lateinit var startButton: TextView
     private lateinit var muteButton: TextView
     private lateinit var modeButton: TextView
@@ -90,6 +106,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         config = AppConfig.load(this)
+        metrics = DeviceMetrics(this)
+        runLogger = RunLogger(this)
         applyOrientation()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         buildUi()
@@ -124,9 +142,13 @@ class MainActivity : Activity() {
         )
         audio.muted = config.micMuted
         stream = StreamController(compositor, audio, object : StreamController.Listener {
-            override fun onStats(stats: StreamController.Stats) { lastStats = stats; refreshStatus() }
+            override fun onStats(stats: StreamController.Stats) {
+                lastStats = stats; refreshStatus()
+                if (stats.durationSec % 5 == 0L) logRow(stats)
+            }
             override fun onStreamEnded(error: String?) {
                 lastStats = null
+                runLogger.finish()?.let { toast("运行日志已保存：$it") }
                 streamEndMessage = error
                 updateStreamUi()
                 refreshStatus()
@@ -140,6 +162,66 @@ class MainActivity : Activity() {
         }
         setupWebLayer()
         pushScene()
+        registerNetworkCallback()
+        mainHandler.post(perfTick)
+    }
+
+    /** 网络恢复立即重连；当前网络丢失时主动断开，尽快进入重连（30 秒内恢复的验收项）。 */
+    private fun registerNetworkCallback() {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) { mainHandler.post { if (pipelineReady) stream.onNetworkAvailable() } }
+            override fun onLost(network: Network) {
+                mainHandler.post {
+                    if (pipelineReady && cm.activeNetwork == null) stream.onNetworkLost()
+                }
+            }
+        }
+        try { cm.registerDefaultNetworkCallback(cb); networkCallback = cb } catch (_: Exception) {}
+    }
+
+    // ---- 常驻性能信息：合成帧率、网页采集模式/帧率/耗时、内存、温度 ----
+    private var perfLastRendered = 0L
+    private var perfLastWebFrames = 0L
+    private var perfTicks = 0
+    private val perfTick = object : Runnable {
+        override fun run() {
+            if (!pipelineReady) return
+            val rendered = compositor.renderedFrames
+            val webFrames = web?.captureFrames ?: 0L
+            val outFps = (rendered - perfLastRendered).coerceAtLeast(0)
+            val webFps = (webFrames - perfLastWebFrames).coerceAtLeast(0)
+            perfLastRendered = rendered; perfLastWebFrames = webFrames
+            if (perfTicks++ % 5 == 0) lastMetrics = try { metrics.sample() } catch (_: Exception) { null }
+            lastWebFps = webFps.toInt()
+            val m = lastMetrics
+            perfText.text = buildString {
+                append("合成 ${outFps}fps · 网页采集 ${if (config.webCaptureGpu) "GPU" else "CPU"} ${webFps}fps")
+                web?.let { append(" ${"%.1f".format(it.lastCaptureMs)}ms") }
+                if (m != null) append(" · 内存 ${m.pssMb}MB · 电池 ${"%.1f".format(m.batteryTempC)}°C · 热状态 ${m.thermal}")
+                if (syncTest) append(" · 同步测试信号开启")
+            }
+            mainHandler.postDelayed(this, 1000)
+        }
+    }
+    private var lastWebFps = 0
+
+    private fun logRow(st: StreamController.Stats) {
+        val m = lastMetrics
+        runLogger.append(listOf(st.durationSec, st.state.name, "%.1f".format(st.outputFps), "%.0f".format(st.bitrateKbps),
+            st.droppedFrames, st.renderLate, st.reconnects, "%.1f".format(web?.lastCaptureMs ?: 0.0), lastWebFps,
+            m?.pssMb ?: 0, m?.javaMb ?: 0, m?.batteryTempC ?: 0f, m?.thermal ?: ""))
+    }
+
+    private fun retryCapture() {
+        if (!pipelineReady) return
+        cameraMessage = null; micMessage = null
+        camera.retry()
+        audio.stopCapture(); audio.startCapture()
+        if (webState == WebOverlaySource.LoadState.CRASHED || webState == WebOverlaySource.LoadState.ERROR) {
+            if (web == null) setupWebLayer() else web?.reload()
+        }
+        refreshStatus()
     }
 
     private var cameraTexture: android.graphics.SurfaceTexture? = null
@@ -152,6 +234,13 @@ class MainActivity : Activity() {
     override fun onStart() {
         super.onStart()
         started = true
+        // 权限可能在后台被撤销（或“仅限这一次”到期）：重新申请
+        val missing = listOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+            .filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) {
+            if (pipelineReady) requestPermissions(missing.toTypedArray(), REQ_PERM)
+            return
+        }
         startCapture()
     }
 
@@ -184,6 +273,8 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         super.onDestroy()
         if (!pipelineReady) return
+        mainHandler.removeCallbacks(perfTick)
+        networkCallback?.let { try { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(it) } catch (_: Exception) {} }
         stream.stop()
         web?.release()
         camera.release()
@@ -318,6 +409,7 @@ class MainActivity : Activity() {
         }
         config.save(this)
         streamEndMessage = null
+        runLogger.begin("${config.canvasWidth}x${config.canvasHeight}@${config.fps} ${config.videoBitrateKbps}kbps web=${if (config.webCaptureGpu) "GPU" else "CPU"} ${Build.MANUFACTURER} ${Build.MODEL} Android ${Build.VERSION.RELEASE} ${url.masked()}")
         stream.start(url, config.canvasWidth, config.canvasHeight, config.fps, config.videoBitrateKbps * 1000, config.keyFrameIntervalSec)
         updateStreamUi()
         refreshStatus()
@@ -361,6 +453,8 @@ class MainActivity : Activity() {
         webStatusText = label("", 12f, Color.rgb(200, 200, 200))
         levelBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100 }
         top.addView(statusText)
+        perfText = label("", 11f, Color.rgb(160, 230, 160))
+        top.addView(perfText)
         top.addView(webStatusText)
         top.addView(levelBar, LinearLayout.LayoutParams(-1, dp(6)))
         root.addView(top, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
@@ -380,6 +474,7 @@ class MainActivity : Activity() {
         bar.addView(button("图层") { togglePanel("layers") })
         bar.addView(button("网页") { togglePanel("web") })
         bar.addView(button("推流设置") { togglePanel("stream") })
+        bar.addView(button("重试采集") { retryCapture() })
         val barScroll = HorizontalScrollView(this).apply { addView(bar) }
         root.addView(barScroll, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
 
@@ -390,13 +485,26 @@ class MainActivity : Activity() {
         })
 
         setContentView(root)
+        // targetSdk 35 强制全面屏：内容避开系统栏与挖孔区域
+        root.setOnApplyWindowInsetsListener { v, insets ->
+            if (Build.VERSION.SDK_INT >= 30) {
+                val i = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+                v.setPadding(i.left, i.top, i.right, i.bottom)
+            } else {
+                @Suppress("DEPRECATION")
+                v.setPadding(insets.systemWindowInsetLeft, insets.systemWindowInsetTop, insets.systemWindowInsetRight, insets.systemWindowInsetBottom)
+            }
+            v.post { layoutPreview() }
+            insets
+        }
         root.post { layoutPreview() }
         updateStreamUi()
     }
 
     /** 预览框按画布比例居中适配屏幕。 */
     private fun layoutPreview() {
-        val rw = root.width; val rh = root.height
+        val rw = root.width - root.paddingLeft - root.paddingRight
+        val rh = root.height - root.paddingTop - root.paddingBottom
         if (rw == 0 || rh == 0) return
         val cw = config.canvasWidth.toFloat(); val ch = config.canvasHeight.toFloat()
         val s = minOf(rw / cw, rh / ch)
@@ -486,7 +594,11 @@ class MainActivity : Activity() {
             config.orientation = it; onCanvasChanged()
         }.apply { isEnabled = !live })
         c.addView(label("输出分辨率（按设备编码能力，首版 720p / 1080p）"))
-        c.addView(spinner(Resolution.values().toList(), config.resolution.ordinal, { it.label }) {
+        val resList = Resolution.values().filter {
+            it == config.resolution || (if (config.orientation == CanvasOrientation.LANDSCAPE)
+                VideoEncoder.supports(it.long, it.short, config.fps) else VideoEncoder.supports(it.short, it.long, config.fps))
+        }
+        c.addView(spinner(resList, resList.indexOf(config.resolution), { it.label }) {
             config.resolution = it
             config.videoBitrateKbps = if (it == Resolution.P1080) 4000 else 2500
             onCanvasChanged()
@@ -514,6 +626,10 @@ class MainActivity : Activity() {
         }.apply { isEnabled = !live })
         c.addView(check("允许局域网 HTTP 明文网页", config.allowCleartextWeb) {
             config.allowCleartextWeb = it; config.save(this); if (pipelineReady) setupWebLayer()
+        })
+        c.addView(check("音画同步测试信号（左上角每秒闪白 + 1kHz 提示音，替换麦克风声音）", syncTest) {
+            syncTest = it
+            if (pipelineReady) { compositor.syncTest = it; audio.syncTest = it }
         })
         c.addView(label("摄像头旋转校正（个别机型方向异常时使用）"))
         c.addView(spinner(listOf(0, 90, 180, 270), config.cameraRotationFix / 90, { "$it°" }) {

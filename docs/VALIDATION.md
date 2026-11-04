@@ -11,6 +11,7 @@
 | 地址解析/脱敏 | `UrlChecks` | ✅ |
 | App 代码编译检查 | 用 Android 14 框架 jar（Robolectric android-all）编译全部源码 | ✅ |
 | APK 构建 + Lint | GitHub Actions `Build & Verify` | 见 CI |
+| 音画同步测量脚本 | 用 ffmpeg 合成一段声音人为晚 80ms 的测试文件 | ✅ 测得 +79ms |
 | 测试网页透明度 | Chromium 截图（透明背景）取色：空白区 alpha=0，50% 色块 alpha=128 | ✅ |
 
 **云端做不到、必须真机验证的**：Camera2 采集、WebView 离屏采集（GPU/CPU 两种模式）、MediaCodec 硬件编码、实际帧率/温升/内存、音画同步。

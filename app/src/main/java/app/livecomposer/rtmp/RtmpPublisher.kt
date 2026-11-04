@@ -68,6 +68,22 @@ class RtmpPublisher(
         thread = Thread({ runLoop(url, info) }, "rtmp-sender").also { it.start() }
     }
 
+    @Volatile private var retryAttempt = 0
+
+    /** 系统网络恢复：如果正在等待重连，立即重连并重置退避间隔。 */
+    fun reconnectNow() {
+        if (!running || state != State.RECONNECTING) return
+        retryAttempt = 0
+        thread?.interrupt()
+    }
+
+    /** 系统报告当前网络已断开：主动断开连接，尽快进入重连，而不是等 TCP 超时。 */
+    fun dropConnection() {
+        if (!running || state != State.LIVE) return
+        log("系统网络断开，主动进入重连")
+        conn?.close()
+    }
+
     fun stop() {
         running = false
         lock.withLock { queue.clear(); notEmpty.signalAll() }
@@ -111,14 +127,15 @@ class RtmpPublisher(
     }
 
     private fun runLoop(url: RtmpUrl, info: StreamInfo) {
-        var attempt = 0
+        retryAttempt = 0
         while (running) {
-            setState(if (attempt == 0 && reconnectCount == 0) State.CONNECTING else State.RECONNECTING, null, 0)
+            Thread.interrupted() // 清除 reconnectNow() 留下的中断标记
+            setState(if (retryAttempt == 0 && reconnectCount == 0) State.CONNECTING else State.RECONNECTING, null, 0)
             val c = RtmpConnection(url, sslFactory = sslFactory, log = log)
             try {
                 c.connectAndPublish()
                 conn = c
-                attempt = 0
+                retryAttempt = 0
                 lock.withLock { queue.clear() }
                 needKeyFrame = true
                 connected = true
@@ -133,15 +150,15 @@ class RtmpPublisher(
                 if (!running) break
                 // 首次连接遇到不可重试错误：直接失败；直播中断后的重连对所有网络类错误都持续重试
                 val fatal = err.kind == RtmpErrorKind.BAD_URL || err.kind == RtmpErrorKind.TLS ||
-                    (err.kind == RtmpErrorKind.SERVER_REJECTED && reconnectCount == 0 && attempt == 0) ||
+                    (err.kind == RtmpErrorKind.SERVER_REJECTED && reconnectCount == 0 && retryAttempt == 0) ||
                     err.kind == RtmpErrorKind.ENCODER
                 if (fatal) {
                     running = false
                     setState(State.FAILED, err, 0)
                     return
                 }
-                val delay = RETRY_DELAYS_MS[minOf(attempt, RETRY_DELAYS_MS.size - 1)]
-                attempt++
+                val delay = RETRY_DELAYS_MS[minOf(retryAttempt, RETRY_DELAYS_MS.size - 1)]
+                retryAttempt++
                 reconnectCount++
                 log("推流中断（${err.kind.label}）：${err.message}，${delay}ms 后重连")
                 setState(State.RECONNECTING, err, delay)
@@ -172,7 +189,9 @@ class RtmpPublisher(
                 throw RtmpException(RtmpErrorKind.NETWORK, "发送阻塞超时，网络可能已断开")
             }
             val p = lock.withLock {
-                if (queue.isEmpty()) notEmpty.awaitNanos(200_000_000L)
+                if (queue.isEmpty()) {
+                    try { notEmpty.awaitNanos(200_000_000L) } catch (_: InterruptedException) { }
+                }
                 queue.pollFirst()
             } ?: continue
 
