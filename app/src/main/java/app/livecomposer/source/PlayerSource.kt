@@ -81,6 +81,13 @@ class PlayerSource(
 
     fun setVolume(v: Float) = mixer.setVolume(id, v)
 
+    /** 本机监听音量（0 = 不外放，只进推流）。只影响手机扬声器，推流里的声音不变。 */
+    private var monitor = 0f
+    fun setMonitor(v: Float) {
+        monitor = v.coerceIn(0f, 1f)
+        player?.volume = monitor
+    }
+
     fun pause() { player?.pause() }
 
     /** 切换循环 / 不循环（只对视频文件有效）。已播完时打开循环会从头重新播放。 */
@@ -116,7 +123,7 @@ class PlayerSource(
         val p = build()
         player = p
         p.setVideoSurface(surface)
-        p.volume = 0f // 本机静音，声音只进推流
+        p.volume = monitor // 默认 0：本机静音，声音只进推流（推流的声音在音量之前就分走了，不受影响）
         p.repeatMode = if (!live && loop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
         p.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {

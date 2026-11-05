@@ -35,6 +35,7 @@ class PlayerSource(
     fun setVolume(v: Float) {}
     fun pause() {}
     fun setLoop(value: Boolean) {}
+    fun setMonitor(v: Float) {}
     fun resume() {}
     fun release() {}
 }
