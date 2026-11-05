@@ -87,6 +87,8 @@ data class EngineState(
     val zoomMax: Float,
     val syncTest: Boolean,
     val noiseSuppression: Boolean,
+    /** 网页声音接管情况。 */
+    val webAudio: String?,
     val powerSave: Boolean,
     /** 网页采集帧率，0 = 跟随输出。 */
     val webCaptureFps: Int,
@@ -149,6 +151,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
     private var webFps = 0
     private var metrics: DeviceMetrics.Sample? = null
     private var syncTest = false
+    private var webAudio: String? = null
     private var notice: String? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private val bitmapKeys = HashMap<String, String>()
@@ -187,7 +190,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
             renderFps = renderFps, webFps = webFps, webCaptureMs = web?.lastCaptureMs ?: 0.0, metrics = metrics,
             zoom = config.zoom,
             zoomMin = if (ready) camera.zoomRange.lower else 1f, zoomMax = if (ready) camera.zoomRange.upper else 1f,
-            syncTest = syncTest, noiseSuppression = config.noiseSuppression,
+            syncTest = syncTest, noiseSuppression = config.noiseSuppression, webAudio = webAudio,
             powerSave = config.powerSave, webCaptureFps = config.webCaptureFps, webGpu = config.webCaptureGpu, allowCleartext = config.allowCleartextWeb,
             cameraRotationFix = config.cameraRotationFix,
             useFullUrl = config.useFullUrl, fullUrl = config.fullUrl, serverUrl = config.serverUrl, streamKey = config.streamKey,
@@ -472,6 +475,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
     private fun setupWebLayer() {
         web?.release(); web = null
         webOutputVisible = false
+        webAudio = null
         val l = webLayer() ?: run { webState = WebOverlaySource.LoadState.IDLE; return }
         compositor.releaseExternalSurface(l.id)
         val src = WebOverlaySource(activity, webParent, l.viewportW, l.viewportH, config.webCaptureGpu,
@@ -482,6 +486,9 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
                 override fun onOutputVisibilityChanged(visible: Boolean) { webOutputVisible = visible; pushScene() }
                 override fun onViewportMeasured(cssWidth: Int, cssHeight: Int, dpr: Float) {
                     webViewport = "${cssWidth}×$cssHeight"; changed()
+                }
+                override fun onAudioStatus(summary: String?) {
+                    webAudio = summary; changed()
                 }
             }, audio.mixer, l.id, effectiveVolume(l))
         web = src
