@@ -52,3 +52,11 @@ tasks.register<JavaExec>("mixerChecks") {
     mainClass.set("MixerChecksKt")
     jvmArgs("-Dstdout.encoding=UTF-8", "-Dfile.encoding=UTF-8")
 }
+
+tasks.register<JavaExec>("denoiseChecks") {
+    group = "verification"
+    description = "麦克风降噪：底噪压低、人声保留、关闭时无损、固定延迟"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("DenoiseChecksKt")
+    jvmArgs("-Dstdout.encoding=UTF-8", "-Dfile.encoding=UTF-8")
+}
