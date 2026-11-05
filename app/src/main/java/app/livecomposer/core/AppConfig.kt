@@ -108,6 +108,10 @@ data class AppConfig(
     var cameraRotationFix: Int = 0,
     /** 麦克风本地降噪，默认开启。 */
     var noiseSuppression: Boolean = true,
+    /** 直播时省电：预览降帧、无操作自动调暗屏幕。推流画面不受影响。 */
+    var powerSave: Boolean = true,
+    /** 网页采集帧率，0 = 跟随输出帧率。 */
+    var webCaptureFps: Int = 0,
     val layers: MutableList<Layer> = mutableListOf(),
 ) {
     val canvasWidth get() = if (orientation == CanvasOrientation.LANDSCAPE) resolution.long else resolution.short
@@ -136,6 +140,8 @@ data class AppConfig(
                 c.webCaptureGpu = o.optBoolean("webCaptureGpu", true)
                 c.cameraRotationFix = o.optInt("cameraRotationFix", 0)
                 c.noiseSuppression = o.optBoolean("noiseSuppression", true)
+                c.powerSave = o.optBoolean("powerSave", true)
+                c.webCaptureFps = o.optInt("webCaptureFps", 0)
                 val arr = o.optJSONArray("layers") ?: JSONArray()
                 for (i in 0 until arr.length()) c.layers.add(Layer.fromJson(arr.getJSONObject(i)))
             } catch (_: Exception) {
@@ -201,6 +207,7 @@ data class AppConfig(
             put("useFullUrl", useFullUrl); put("serverUrl", serverUrl); put("zoom", zoom.toDouble())
             put("micMuted", micMuted); put("allowCleartextWeb", allowCleartextWeb); put("webCaptureGpu", webCaptureGpu)
             put("cameraRotationFix", cameraRotationFix); put("noiseSuppression", noiseSuppression)
+            put("powerSave", powerSave); put("webCaptureFps", webCaptureFps)
             put("layers", JSONArray().apply { layers.forEach { put(it.toJson()) } })
         }
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
