@@ -406,20 +406,31 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         }
     }
 
-    /** 添加媒体图层。live=true 为拉流地址，false 为本地视频（content:// URI）。 */
-    fun addMediaLayer(uri: String, live: Boolean): Layer? {
+    /** 是否网络视频（点播 http(s) 地址，非拉流）。 */
+    private fun isRemoteVideo(uri: String) = uri.startsWith("http://", true) || uri.startsWith("https://", true)
+
+    /**
+     * 添加媒体图层。live=true 为拉流地址；false 为视频文件：本地（content:// URI）或网络视频（http(s) 地址）。
+     * loop 只对视频文件生效。
+     */
+    fun addMediaLayer(uri: String, live: Boolean, loop: Boolean = true): Layer? {
         val u = uri.trim()
-        if (u.isEmpty()) { notify("请输入拉流地址"); return null }
+        val remote = !live && isRemoteVideo(u)
+        if (u.isEmpty()) { notify(if (live) "请输入拉流地址" else "请输入视频地址"); return null }
         if (live && !SUPPORTED_PULL.any { u.startsWith(it, ignoreCase = true) }) {
             notify("拉流地址需以 http(s)://、rtmp://、rtsp:// 开头"); return null
+        }
+        if (!live && !remote && !u.startsWith("content://") && !u.startsWith("file://")) {
+            notify("视频地址需以 http:// 或 https:// 开头"); return null
         }
         if (config.layers.count { it.type == LayerType.MEDIA } >= MAX_MEDIA) { notify("最多同时添加 $MAX_MEDIA 路媒体（受手机解码器数量限制）"); return null }
         val n = config.layers.count { it.type == LayerType.MEDIA } + 1
         val cw = config.canvasWidth.toFloat(); val ch = config.canvasHeight.toFloat()
         var w = cw / 2; var h = w * 9 / 16
         if (h > ch / 2) { h = ch / 2; w = h * 16 / 9 }
-        val l = Layer(type = LayerType.MEDIA, name = if (live) "拉流 $n" else "视频 $n",
-            x = (cw - w) / 2, y = (ch - h) / 2, w = w, h = h, mediaUri = u, mediaLive = live)
+        val name = when { live -> "拉流 $n"; remote -> "网络视频 $n"; else -> "视频 $n" }
+        val l = Layer(type = LayerType.MEDIA, name = name,
+            x = (cw - w) / 2, y = (ch - h) / 2, w = w, h = h, mediaUri = u, mediaLive = live, loop = loop)
         config.layers.add(l)
         autoSize.add(l.id)
         config.save(activity)
@@ -431,9 +442,16 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
     /** 修改媒体图层的地址 / 循环设置，并重新开始播放。 */
     fun updateMedia(id: String, uri: String, loop: Boolean) {
         val l = config.layers.firstOrNull { it.id == id && it.type == LayerType.MEDIA } ?: return
-        l.mediaUri = uri.trim(); l.loop = loop
+        val u = uri.trim()
+        if (u == l.mediaUri && loop == l.loop) return
+        if (!l.mediaLive && u != l.mediaUri && !isRemoteVideo(u)) { notify("视频地址需以 http:// 或 https:// 开头"); return }
+        val onlyLoop = u == l.mediaUri
+        l.mediaUri = u; l.loop = loop
         config.save(activity)
-        if (ready) setupMedia(l)
+        // 只改循环：不重新加载，直接切换播放器的循环模式，画面不中断
+        val p = players[id]
+        if (onlyLoop && p != null) p.setLoop(loop)
+        else if (ready) setupMedia(l)
         changed()
     }
 

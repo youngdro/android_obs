@@ -98,8 +98,10 @@ class StudioCallbacks(
     val onRetry: () -> Unit,
     val onConsumeNotice: () -> Unit,
     val onDeleteLayer: (String) -> Unit,
-    val onAddMedia: (String, Boolean) -> String?,
-    val onPickVideo: () -> Unit,
+    /** 添加媒体图层：(地址, 是否拉流, 是否循环) */
+    val onAddMedia: (String, Boolean, Boolean) -> String?,
+    /** 选择本地视频，参数为是否循环。 */
+    val onPickVideo: (Boolean) -> Unit,
     val onMedia: (String, String, Boolean) -> Unit,
     val scenes: SceneActions,
 )
@@ -408,8 +410,9 @@ private fun PanelHost(state: EngineState, ui: StudioUi, cb: StudioCallbacks, lan
                 )
             }
             Panel.ADD -> AddPanel(state,
-                onAddStream = { url -> cb.onAddMedia(url, true)?.let { ui.selectedId = it; ui.panel = Panel.NONE } },
-                onPickVideo = { cb.onPickVideo(); ui.panel = Panel.NONE },
+                onAddStream = { url -> cb.onAddMedia(url, true, false)?.let { ui.selectedId = it; ui.panel = Panel.NONE } },
+                onAddRemoteVideo = { url, loop -> cb.onAddMedia(url, false, loop)?.let { ui.selectedId = it; ui.panel = Panel.NONE } },
+                onPickVideo = { loop -> cb.onPickVideo(loop); ui.panel = Panel.NONE },
                 onAddWeb = { url -> cb.onAddWeb(url)?.let { ui.selectedId = it }; ui.panel = Panel.NONE },
                 onPickImage = { cb.onPickImage(); ui.panel = Panel.NONE },
                 onAddText = { t -> cb.onAddText(t)?.let { ui.selectedId = it; ui.panel = Panel.INSPECTOR } },
