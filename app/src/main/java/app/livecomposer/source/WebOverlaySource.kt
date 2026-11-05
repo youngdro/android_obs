@@ -85,7 +85,15 @@ class WebOverlaySource(
     private var scaleK = context.resources.displayMetrics.density
     private var calibrated = false
 
-    private val minIntervalNs = 1_000_000_000L / captureFps * 9 / 10
+    @Volatile private var minIntervalNs = 1_000_000_000L / captureFps * 9 / 10
+    private var intervalMs = 1000L / captureFps
+
+    /** 修改网页采集帧率（不重新加载页面）。静态网页可以设低，明显降低发热。 */
+    fun setCaptureFps(fps: Int) {
+        val f = fps.coerceIn(1, 60)
+        minIntervalNs = 1_000_000_000L / f * 9 / 10
+        intervalMs = 1000L / f
+    }
     private var lastCaptureNs = 0L
     var captureFrames = 0L; private set
     var lastCaptureMs = 0.0; private set
@@ -94,6 +102,15 @@ class WebOverlaySource(
     @SuppressLint("ViewConstructor")
     private inner class Host(ctx: Context) : FrameLayout(ctx) {
         @Volatile var capturing = false
+        private var tickPending = false
+        private val tick = Runnable { tickPending = false; invalidate() }
+
+        /** 按采集帧率安排下一次重绘（而不是每个屏幕刷新都重绘，120Hz 屏上能省下大半网页绘制）。 */
+        private fun scheduleTick(delayMs: Long) {
+            if (tickPending) return
+            tickPending = true
+            postDelayed(tick, delayMs.coerceAtLeast(1))
+        }
 
         init {
             setWillNotDraw(false)
@@ -118,10 +135,13 @@ class WebOverlaySource(
             val s = surface ?: return
             if (!capturing || !s.isValid) return
             val t0 = System.nanoTime()
-            // 持续采集，保证 CSS/Canvas 动画每帧都能进入画面；按输出帧率限速
-            postInvalidateOnAnimation()
-            if (t0 - lastCaptureNs < minIntervalNs) return
+            // 持续采集，保证 CSS/Canvas 动画能进入画面；按采集帧率安排重绘，不跟屏幕刷新率走
+            if (t0 - lastCaptureNs < minIntervalNs) {
+                scheduleTick((minIntervalNs - (t0 - lastCaptureNs)) / 1_000_000 + 1)
+                return
+            }
             lastCaptureNs = t0
+            scheduleTick(intervalMs)
             val c: Canvas = try {
                 if (gpuCapture) s.lockHardwareCanvas() else s.lockCanvas(null)
             } catch (e: Exception) {

@@ -6,7 +6,11 @@ import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.MotionEvent
 import android.view.Surface
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -42,6 +46,11 @@ class StudioActivity : ComponentActivity() {
     /** 选本地视频前在“添加来源”里选的循环设置。 */
     private var pickLoop = true
 
+    // ---- 省电：直播中一段时间无操作自动调暗屏幕，触摸恢复
+    private val main = Handler(Looper.getMainLooper())
+    private var dimmed = false
+    private val dimTask = Runnable { maybeDim() }
+
     private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         if (hasPermissions()) initEngine()
         else engine.notify("需要摄像头和麦克风权限才能采集与推流")
@@ -69,6 +78,7 @@ class StudioActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        preferLowRefreshRate()
 
         val root = FrameLayout(this)
         val webParent = FrameLayout(this)
@@ -78,7 +88,11 @@ class StudioActivity : ComponentActivity() {
         setContentView(root)
 
         engine = StudioEngine(this, webParent)
-        engine.onChanged = { state.value = engine.snapshot() }
+        engine.onChanged = {
+            val s = engine.snapshot()
+            state.value = s
+            if (dimmed && !s.isStreaming) { undim(); scheduleDim() } // 停播后恢复亮度
+        }
         state.value = engine.snapshot()
         applyOrientation()
 
@@ -156,14 +170,65 @@ class StudioActivity : ComponentActivity() {
         )
     }
 
+    /**
+     * 120Hz / 90Hz 屏幕降到 60Hz：输出最高 60fps，界面和预览没必要按高刷绘制，屏幕和 GPU 都更省电。
+     * 只选与当前分辨率相同的模式；系统或厂商不支持时忽略。
+     */
+    private fun preferLowRefreshRate() {
+        try {
+            @Suppress("DEPRECATION")
+            val d = if (Build.VERSION.SDK_INT >= 30) display else windowManager.defaultDisplay
+            d ?: return
+            val cur = d.mode
+            val mode = d.supportedModes
+                .filter { it.physicalWidth == cur.physicalWidth && it.physicalHeight == cur.physicalHeight && it.refreshRate >= 59f }
+                .minByOrNull { it.refreshRate } ?: return
+            if (mode.modeId != cur.modeId) window.attributes = window.attributes.apply { preferredDisplayModeId = mode.modeId }
+        } catch (_: Exception) {
+        }
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
+            val wasDimmed = dimmed
+            undim()
+            scheduleDim()
+            if (wasDimmed) return true // 唤醒屏幕的这次触摸不当作操作，避免误触
+        }
+        return super.dispatchTouchEvent(ev)
+    }
+
+    private fun scheduleDim() {
+        main.removeCallbacks(dimTask)
+        main.postDelayed(dimTask, DIM_AFTER_MS)
+    }
+
+    private fun maybeDim() {
+        val s = state.value
+        if (initialized && started && engine.config.powerSave && s != null && s.isStreaming && !dimmed) {
+            dimmed = true
+            window.attributes = window.attributes.apply { screenBrightness = 0.02f }
+            engine.notify("已调暗屏幕省电，直播不受影响；触摸屏幕恢复")
+        } else if (!dimmed) scheduleDim()
+    }
+
+    private fun undim() {
+        if (!dimmed) return
+        dimmed = false
+        window.attributes = window.attributes.apply { screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE }
+    }
+
     override fun onStart() {
         super.onStart()
+        scheduleDim()
         started = true
         if (!initialized && hasPermissions()) initEngine() else if (initialized) engine.onStart()
     }
 
     override fun onStop() {
         started = false
+        main.removeCallbacks(dimTask)
+        undim()
         if (initialized && engine.onStop()) ui.backgroundStopped = true
         super.onStop()
     }
@@ -171,6 +236,10 @@ class StudioActivity : ComponentActivity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         if (initialized) engine.onDisplayRotationChanged()
+    }
+
+    companion object {
+        private const val DIM_AFTER_MS = 45_000L
     }
 
     override fun onDestroy() {
