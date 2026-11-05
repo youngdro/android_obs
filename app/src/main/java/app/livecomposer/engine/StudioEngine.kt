@@ -21,6 +21,10 @@ import app.livecomposer.core.CanvasOrientation
 import app.livecomposer.core.Layer
 import app.livecomposer.core.LayerType
 import app.livecomposer.core.Resolution
+import app.livecomposer.core.Scene
+import app.livecomposer.core.SceneStore
+import app.livecomposer.core.sceneLayers
+import app.livecomposer.core.toSceneData
 import app.livecomposer.encode.AudioPipeline
 import app.livecomposer.encode.VideoEncoder
 import app.livecomposer.gl.Compositor
@@ -34,6 +38,13 @@ import app.livecomposer.stream.DeviceMetrics
 import app.livecomposer.stream.RunLogger
 import app.livecomposer.stream.StreamController
 import kotlin.math.abs
+
+/** 场景列表项（界面用）。 */
+data class SceneInfo(
+    val id: String, val name: String, val savedAt: Long,
+    val orientation: CanvasOrientation, val resolution: Resolution, val fps: Int,
+    val layerTypes: List<LayerType>,
+)
 
 /** 媒体图层播放状态。 */
 data class MediaStatus(val state: PlayerSource.State, val message: String?, val videoW: Int, val videoH: Int)
@@ -87,6 +98,9 @@ data class EngineState(
     val media: Map<String, MediaStatus> = emptyMap(),
     /** 各有声图层的电平 0..1，按图层 id（摄像头图层 = 麦克风）。 */
     val audioLevels: Map<String, Float> = emptyMap(),
+    val scenes: List<SceneInfo> = emptyList(),
+    /** 最近一次切换到或保存的场景（之后改了画面也仍显示它，便于“更新为当前”）。 */
+    val activeSceneId: String? = null,
 ) {
     val isStreaming: Boolean get() = live != LiveState.IDLE && live != LiveState.FAILED
 }
@@ -100,6 +114,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
     var onChanged: (() -> Unit)? = null
 
     val config: AppConfig = AppConfig.load(activity)
+    private val sceneStore = SceneStore(activity)
     private val main = Handler(Looper.getMainLooper())
     private val metricsSampler = DeviceMetrics(activity)
     private val runLogger = RunLogger(activity)
@@ -174,6 +189,8 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
             notice = notice,
             media = HashMap(mediaStatus),
             audioLevels = audioLevels(),
+            scenes = sceneStore.scenes.map { SceneInfo(it.id, it.name, it.savedAt, it.orientation, it.resolution, it.fps, it.layerTypes) },
+            activeSceneId = sceneStore.activeId?.takeIf { id -> sceneStore.find(id) != null },
         )
     }
 
@@ -721,6 +738,126 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
                 l.viewportW = newW.toInt(); l.viewportH = newH.toInt()
             }
         }
+    }
+
+    // ------------------------------------------------------------------ 场景方案
+
+    /** 把当前画面保存为新场景，返回场景 id。 */
+    fun saveScene(name: String): String {
+        val n = name.trim().ifEmpty { "场景 ${sceneStore.scenes.size + 1}" }
+        val sc = Scene(name = n, savedAt = System.currentTimeMillis(), data = config.toSceneData())
+        sceneStore.scenes.add(sc)
+        sceneStore.activeId = sc.id
+        notify("已保存场景“$n”")
+        changed()
+        return sc.id
+    }
+
+    /** 用当前画面覆盖已有场景。 */
+    fun overwriteScene(id: String) {
+        val i = sceneStore.scenes.indexOfFirst { it.id == id }
+        if (i < 0) return
+        val old = sceneStore.scenes[i]
+        sceneStore.scenes[i] = old.copy(savedAt = System.currentTimeMillis(), data = config.toSceneData())
+        sceneStore.activeId = id
+        notify("已更新场景“${old.name}”")
+        changed()
+    }
+
+    fun renameScene(id: String, name: String) {
+        val i = sceneStore.scenes.indexOfFirst { it.id == id }
+        if (i < 0 || name.isBlank()) return
+        sceneStore.scenes[i] = sceneStore.scenes[i].copy(name = name.trim())
+        sceneStore.persist(); changed()
+    }
+
+    fun deleteScene(id: String) {
+        sceneStore.scenes.removeAll { it.id == id }
+        if (sceneStore.activeId == id) sceneStore.activeId = null else sceneStore.persist()
+        changed()
+    }
+
+    fun moveScene(id: String, delta: Int) {
+        val i = sceneStore.scenes.indexOfFirst { it.id == id }
+        if (i < 0) return
+        val j = (i + delta).coerceIn(0, sceneStore.scenes.size - 1)
+        if (i == j) return
+        val sc = sceneStore.scenes.removeAt(i); sceneStore.scenes.add(j, sc)
+        sceneStore.persist(); changed()
+    }
+
+    /**
+     * 切换到场景：替换全部图层并重建网页、媒体、图片/文字来源。
+     * 未直播时同时应用画布、编码等设置；直播中画布和编码不能变，只切换图层，并按当前画布换算图层位置。
+     */
+    fun applyScene(id: String) {
+        val sc = sceneStore.find(id) ?: return
+        val d = sc.data
+        val live = streamActive
+        val oldW = config.canvasWidth; val oldH = config.canvasHeight; val oldFps = config.fps
+        val oldRes = config.resolution; val oldRot = config.cameraRotationFix
+        val sceneOrientation = sc.orientation
+        val sceneRes = sc.resolution
+        val sceneW = if (sceneOrientation == CanvasOrientation.LANDSCAPE) sceneRes.long else sceneRes.short
+        val sceneH = if (sceneOrientation == CanvasOrientation.LANDSCAPE) sceneRes.short else sceneRes.long
+
+        teardownSources()
+        config.layers.clear()
+        config.layers.addAll(sceneLayers(d))
+        if (config.layers.none { it.type == LayerType.CAMERA }) {
+            config.layers.add(0, Layer(type = LayerType.CAMERA, name = "后置摄像头", x = 0f, y = 0f, w = sceneW.toFloat(), h = sceneH.toFloat()))
+        }
+
+        var skipped = false
+        if (!live) {
+            config.orientation = sceneOrientation
+            config.resolution = if (sceneRes in availableResolutions()) sceneRes else config.resolution
+            config.fps = d.optInt("fps", config.fps)
+            config.videoBitrateKbps = d.optInt("videoBitrateKbps", config.videoBitrateKbps)
+            config.keyFrameIntervalSec = d.optInt("keyFrameIntervalSec", config.keyFrameIntervalSec)
+            config.webCaptureGpu = d.optBoolean("webCaptureGpu", config.webCaptureGpu)
+            config.allowCleartextWeb = d.optBoolean("allowCleartextWeb", config.allowCleartextWeb)
+            config.cameraRotationFix = d.optInt("cameraRotationFix", config.cameraRotationFix)
+        } else {
+            skipped = sceneW != oldW || sceneH != oldH || sc.fps != oldFps
+        }
+        config.zoom = d.optDouble("zoom", config.zoom.toDouble()).toFloat()
+        // 场景保存时的画布与现在不同（直播中，或本机不支持该分辨率）：按当前画布换算图层
+        if (sceneW != config.canvasWidth || sceneH != config.canvasHeight) relayout(sceneOrientation, sceneW, sceneH)
+
+        sceneStore.activeId = id
+        config.save(activity)
+        if (ready) {
+            if (oldW != config.canvasWidth || oldH != config.canvasHeight || oldFps != config.fps) {
+                compositor.configure(config.canvasWidth, config.canvasHeight, config.fps)
+            }
+            audio.micVolume = cameraLayer()?.volume ?: 1f
+            setupWebLayer()
+            config.layers.filter { it.type == LayerType.MEDIA }.forEach { setupMedia(it) }
+            if (oldRes != config.resolution || oldRot != config.cameraRotationFix || oldW != config.canvasWidth) scheduleOpenCamera()
+            else camera.setZoom(config.zoom)
+            pushScene()
+        }
+        notify(if (skipped) "已切换到“${sc.name}”。直播中画布和编码不变，场景里的这些设置停播后重新切换才会生效"
+               else "已切换到“${sc.name}”")
+        changed()
+    }
+
+    /** 释放所有图层来源（切换场景前）。摄像头不受影响。 */
+    private fun teardownSources() {
+        web?.release(); web = null; webOutputVisible = false
+        webState = WebOverlaySource.LoadState.IDLE; webMessage = null; webViewport = null
+        players.values.forEach { it.release() }; players.clear()
+        mediaStatus.clear(); autoSize.clear()
+        if (ready) {
+            for (l in config.layers) when (l.type) {
+                LayerType.WEB, LayerType.MEDIA -> compositor.releaseExternalSurface(l.id)
+                LayerType.IMAGE, LayerType.TEXT -> compositor.removeBitmap(l.id)
+                else -> {}
+            }
+            compositor.setScene(emptyList())
+        }
+        bitmapKeys.clear()
     }
 
     fun setSyncTest(on: Boolean) {
