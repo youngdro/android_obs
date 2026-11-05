@@ -89,6 +89,10 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
     private var previewW = 0
     private var previewH = 0
     private var encoderSurface: EGLSurface? = null
+    /** 第二路（纯摄像头）编码器输入及其尺寸。 */
+    private var cameraEncoderSurface: EGLSurface? = null
+    private var cameraEncW = 0
+    private var cameraEncH = 0
 
     // 帧时钟
     private var running = false
@@ -99,6 +103,7 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
     // 统计
     @Volatile var renderedFrames = 0L; private set
     @Volatile var encodedFrames = 0L; private set
+    @Volatile var cameraEncodedFrames = 0L; private set
     @Volatile var lateFrames = 0L; private set
     @Volatile var lastError: String? = null; private set
 
@@ -129,6 +134,7 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
             try {
                 previewSurface?.let { egl.releaseSurface(it) }
                 encoderSurface?.let { egl.releaseSurface(it) }
+                cameraEncoderSurface?.let { egl.releaseSurface(it) }
                 externals.values.forEach { it.surface.release(); it.st.release() }
                 externals.clear()
                 cameraSt?.release()
@@ -208,6 +214,22 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
                     Log.w(TAG, "preview surface", e)
                 }
             }
+            latch.countDown()
+        }
+        latch.await()
+    }
+
+    /** 第二路推流：把摄像头原始画面（不含其他图层）等比铺满画进这个编码器。null = 停止。 */
+    fun setCameraEncoderSurface(surface: Surface?, width: Int, height: Int) {
+        val latch = CountDownLatch(1)
+        handler.post {
+            cameraEncoderSurface?.let { egl.makeNothingCurrent(); egl.releaseSurface(it) }
+            cameraEncoderSurface = null
+            if (surface != null) {
+                cameraEncoderSurface = egl.createWindowSurface(surface)
+                cameraEncW = width; cameraEncH = height
+            }
+            cameraEncodedFrames = 0
             latch.countDown()
         }
         latch.await()
@@ -383,6 +405,19 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
             egl.setPresentationTime(s, pts)
             if (egl.swap(s)) encodedFrames++
         }
+        // ---- 2b. 第二路：纯摄像头画面 ----
+        cameraEncoderSurface?.let { s ->
+            egl.makeCurrent(s)
+            GLES20.glViewport(0, 0, cameraEncW, cameraEncH)
+            GLES20.glClearColor(0f, 0f, 0f, 1f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            if (cameraHasFrame) {
+                oes.draw(cameraTex, cameraMatrix,
+                    cameraCorners(0f, 0f, cameraEncW.toFloat(), cameraEncH.toFloat(), cameraEncW.toFloat(), cameraEncH.toFloat()), 1f)
+            }
+            egl.setPresentationTime(s, pts)
+            if (egl.swap(s)) cameraEncodedFrames++
+        }
         // ---- 3. 输出到预览 ----
         previewSurface?.takeIf { previewEvery <= 1 || renderedFrames % previewEvery == 0L }?.let { s ->
             egl.makeCurrent(s)
@@ -395,7 +430,10 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
     }
 
     /** 摄像头画面：按自然方向旋转 cameraRotationDeg（逆时针），再等比铺满图层框（居中裁切）。 */
-    private fun cameraCorners(x: Float, y: Float, w: Float, h: Float): FloatArray {
+    private fun cameraCorners(
+        x: Float, y: Float, w: Float, h: Float,
+        canvasWidth: Float = this.canvasWidth.toFloat(), canvasHeight: Float = this.canvasHeight.toFloat(),
+    ): FloatArray {
         val (nw, nh) = naturalCameraSize()
         val a = Math.toRadians(cameraRotationDeg.toDouble())
         val rotW = if (cameraRotationDeg % 180 == 0) nw else nh

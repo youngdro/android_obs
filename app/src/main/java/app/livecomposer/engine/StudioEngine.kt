@@ -49,6 +49,17 @@ data class SceneInfo(
 )
 
 /** 媒体图层播放状态。 */
+/** 第二路（纯摄像头）推流的状态与设置。 */
+data class CamStreamState(
+    val active: Boolean,
+    val stats: StreamController.Stats?,
+    val message: String?,
+    val url: String,
+    val audio: Boolean,
+    val resolution: Resolution,
+    val bitrateKbps: Int,
+)
+
 data class MediaStatus(val state: PlayerSource.State, val message: String?, val videoW: Int, val videoH: Int)
 
 /** 直播状态（界面用）。 */
@@ -91,6 +102,8 @@ data class EngineState(
     val webAudio: String?,
     val powerSave: Boolean,
     val monitorLocal: Boolean,
+    /** 第二路（纯摄像头）推流。 */
+    val cam: CamStreamState,
     /** 网页采集帧率，0 = 跟随输出。 */
     val webCaptureFps: Int,
     val webGpu: Boolean,
@@ -153,6 +166,10 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
     private var metrics: DeviceMetrics.Sample? = null
     private var syncTest = false
     private var webAudio: String? = null
+    private lateinit var stream2: StreamController
+    private var stream2Active = false
+    private var stats2: StreamController.Stats? = null
+    private var stream2EndMessage: String? = null
     private var notice: String? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private val bitmapKeys = HashMap<String, String>()
@@ -192,7 +209,9 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
             zoom = config.zoom,
             zoomMin = if (ready) camera.zoomRange.lower else 1f, zoomMax = if (ready) camera.zoomRange.upper else 1f,
             syncTest = syncTest, noiseSuppression = config.noiseSuppression, webAudio = webAudio,
-            powerSave = config.powerSave, monitorLocal = config.monitorLocal, webCaptureFps = config.webCaptureFps, webGpu = config.webCaptureGpu, allowCleartext = config.allowCleartextWeb,
+            powerSave = config.powerSave, monitorLocal = config.monitorLocal,
+            cam = CamStreamState(stream2Active, stats2, stats2?.message ?: stream2EndMessage, config.camUrl, config.camAudio,
+                config.camResolution, config.camBitrateKbps), webCaptureFps = config.webCaptureFps, webGpu = config.webCaptureGpu, allowCleartext = config.allowCleartextWeb,
             cameraRotationFix = config.cameraRotationFix,
             useFullUrl = config.useFullUrl, fullUrl = config.fullUrl, serverUrl = config.serverUrl, streamKey = config.streamKey,
             availableResolutions = availableResolutions(),
@@ -266,6 +285,13 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
                 changed()
             }
         })
+        stream2 = StreamController(compositor, audio, object : StreamController.Listener {
+            override fun onStats(stats: StreamController.Stats) { stats2 = stats; changed() }
+            override fun onStreamEnded(error: String?) {
+                stream2Active = false; stats2 = null; stream2EndMessage = error
+                changed()
+            }
+        }, StreamController.Kind.CAMERA)
         compositor.start { st -> main.post { cameraTexture = st; if (started) openCamera() } }
         if (previewSurface != null) compositor.setPreviewSurface(previewSurface, pw, ph)
         setupWebLayer()
@@ -292,6 +318,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         if (!ready) return false
         var stopped = false
         if (stream.isActive) { stream.stop("应用进入后台，推流已自动停止"); stopped = true }
+        if (stream2.isActive) { stream2.stop("应用进入后台，第二路已自动停止"); stopped = true }
         camera.close()
         audio.stopCapture()
         players.values.forEach { it.pause() }
@@ -306,6 +333,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
             try { activity.getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(it) } catch (_: Exception) {}
         }
         stream.stop()
+        stream2.stop()
         web?.release()
         players.values.forEach { it.release() }; players.clear()
         camera.release()
@@ -715,6 +743,40 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
 
     fun stopStream() { if (ready) stream.stop() }
 
+    // ------------------------------------------------------------------ 第二路：纯摄像头画面
+
+    /** 第二路输出尺寸：方向跟随画布，默认 720p。 */
+    private fun camStreamSize(): Pair<Int, Int> {
+        val r = config.camResolution
+        return if (config.orientation == CanvasOrientation.LANDSCAPE) r.long to r.short else r.short to r.long
+    }
+
+    fun validateCamUrl(): String? = try { RtmpUrl.parse(config.camUrl); null } catch (e: RtmpUrlException) { e.message }
+
+    /** 开始第二路推流（与主推流独立，可以单独开、单独停）。返回错误信息或 null。 */
+    fun startCamStream(): String? {
+        if (!ready) return "正在初始化"
+        if (stream2.isActive) return null
+        val url = try { RtmpUrl.parse(config.camUrl) } catch (e: RtmpUrlException) { return e.message }
+        if (config.useFullUrl && RtmpUrl.sanitize(config.fullUrl) == RtmpUrl.sanitize(config.camUrl)) return "第二路地址和主推流地址相同，请换一个"
+        config.save(activity)
+        stream2EndMessage = null; stats2 = null
+        val (w, h) = camStreamSize()
+        stream2Active = true
+        stream2.start(url, w, h, minOf(config.fps, 30), config.camBitrateKbps * 1000, config.keyFrameIntervalSec, withAudio = config.camAudio)
+        if (!stream2.isActive) stream2Active = false
+        changed()
+        return null
+    }
+
+    fun stopCamStream() { if (ready) stream2.stop() }
+
+    fun updateCamStream(edit: (AppConfig) -> Unit) {
+        edit(config)
+        config.save(activity)
+        changed()
+    }
+
     fun toggleMute() {
         config.micMuted = !config.micMuted
         if (ready) audio.muted = config.micMuted
@@ -734,6 +796,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         config.save(activity)
         if (!ready) { changed(); return }
         audio.noiseReducer.enabled = config.noiseSuppression
+        if (oldOrientation != config.orientation && stream2.isActive) stream2.stop("画布方向变了，第二路已停止，请重新开始")
         web?.setCaptureFps(webFpsTarget())
         applyMonitor()
         updatePowerSave()
@@ -851,6 +914,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
 
         var skipped = false
         if (!live) {
+            if (sceneOrientation != config.orientation && stream2.isActive) stream2.stop("画布方向变了，第二路已停止，请重新开始")
             config.orientation = sceneOrientation
             config.resolution = if (sceneRes in availableResolutions()) sceneRes else config.resolution
             config.fps = d.optInt("fps", config.fps)
@@ -912,8 +976,8 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
     private fun registerNetworkCallback() {
         val cm = activity.getSystemService(ConnectivityManager::class.java) ?: return
         val cb = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) { main.post { if (ready) stream.onNetworkAvailable() } }
-            override fun onLost(network: Network) { main.post { if (ready && cm.activeNetwork == null) stream.onNetworkLost() } }
+            override fun onAvailable(network: Network) { main.post { if (ready) { stream.onNetworkAvailable(); stream2.onNetworkAvailable() } } }
+            override fun onLost(network: Network) { main.post { if (ready && cm.activeNetwork == null) { stream.onNetworkLost(); stream2.onNetworkLost() } } }
         }
         try { cm.registerDefaultNetworkCallback(cb); networkCallback = cb } catch (_: Exception) {}
     }
@@ -954,7 +1018,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
     /** 直播省电：预览降到约 15fps（编码输出仍是完整帧率）。 */
     private fun updatePowerSave() {
         if (!ready) return
-        compositor.previewEvery = if (config.powerSave && streamActive) maxOf(1, config.fps / 15) else 1
+        compositor.previewEvery = if (config.powerSave && (streamActive || stream2Active)) maxOf(1, config.fps / 15) else 1
     }
 
     private val power = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -967,7 +1031,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
             if (st < PowerManager.THERMAL_STATUS_MODERATE) thermalWarned = PowerManager.THERMAL_STATUS_NONE
             return
         }
-        if (st <= thermalWarned || !streamActive) return
+        if (st <= thermalWarned || !(streamActive || stream2Active)) return
         thermalWarned = st
         val tips = buildList {
             if (config.resolution != Resolution.P720) add("降到 720p")

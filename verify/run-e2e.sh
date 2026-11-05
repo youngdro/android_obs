@@ -27,6 +27,20 @@ grep -q "RESULT state=直播中" "$W/1.log" || fail "RTMP 未进入直播中"
 DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$W/rtmp.flv"); echo "接收时长 $DUR 秒"
 python3 -c "import sys; sys.exit(0 if float('$DUR') > 5 else 1)" || fail "接收时长过短"
 
+echo "== 1b. 只推画面（第二路关闭声音）与两路并行"
+ffmpeg -v error -y -listen 1 -i rtmp://127.0.0.1:19351/live/cam -c copy "$W/cam.flv" & L1=$!
+ffmpeg -v error -y -listen 1 -i rtmp://127.0.0.1:19352/live/main -c copy "$W/main2.flv" & L2=$!
+sleep 1
+$G rtmpE2E -Pe2eArgs="$W/v.h264 - rtmp://127.0.0.1:19351/live/cam 30 6" > "$W/1b-cam.log" &
+P1=$!
+run rtmp://127.0.0.1:19352/live/main 6 > "$W/1b-main.log"
+wait $P1; wait $L1 || true; wait $L2 || true
+grep -q "RESULT state=直播中" "$W/1b-cam.log" || fail "只推画面的一路未进入直播中"
+grep -q "RESULT state=直播中" "$W/1b-main.log" || fail "并行的主推流未进入直播中"
+[[ "$(probe "$W/cam.flv")" == "h264 " ]] || fail "只推画面的一路不应有音频流：$(probe "$W/cam.flv")"
+[[ "$(probe "$W/main2.flv")" == "aac h264 " ]] || fail "并行主推流缺少音视频流"
+echo "只推画面 OK，两路并行 OK"
+
 echo "== 2. RTMPS（自签证书 + 信任库）"
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$W/k.pem" -out "$W/c.pem" -days 1 -subj "/CN=localhost" \
   -addext "subjectAltName=DNS:localhost" 2>/dev/null

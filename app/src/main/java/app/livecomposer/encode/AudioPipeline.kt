@@ -45,10 +45,10 @@ class AudioPipeline(
     /** 音画同步测试：替换麦克风输入，在每个整秒（MONOTONIC）开始的 50ms 内输出 1kHz 提示音，其余静音。 */
     @Volatile var syncTest = false
 
-    private val encoderLock = Any()
-    private var codec: MediaCodec? = null
-    private var onConfig: ((ByteArray) -> Unit)? = null
-    private var onPacket: ((MediaPacket) -> Unit)? = null
+    /** 主推流（合流）的 AAC 编码：麦克风 + 其他媒体源混音。 */
+    private val mainSink = AacSink()
+    /** 第二路（纯摄像头）推流的 AAC 编码：只有麦克风。 */
+    private val micSink = AacSink()
 
     @SuppressLint("MissingPermission")
     fun startCapture() {
@@ -83,37 +83,97 @@ class AudioPipeline(
         record = null
     }
 
-    fun attachEncoder(onConfig: (ByteArray) -> Unit, onPacket: (MediaPacket) -> Unit) {
-        val fmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, channels).apply {
-            setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-            setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
-            setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
-        }
-        val c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-        c.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        c.start()
-        // 序列头用标准 AAC-LC AudioSpecificConfig；编码器输出的 csd 到达后再覆盖
-        onConfig(FlvMux.aacSequenceHeader(FlvMux.aacLcConfig(sampleRate, channels)))
-        synchronized(encoderLock) {
-            this.onConfig = onConfig; this.onPacket = onPacket; codec = c
-        }
-    }
+    fun attachEncoder(onConfig: (ByteArray) -> Unit, onPacket: (MediaPacket) -> Unit) = mainSink.attach(onConfig, onPacket)
+    fun detachEncoder() = mainSink.detach()
 
-    fun detachEncoder() {
-        val c = synchronized(encoderLock) { val c = codec; codec = null; onConfig = null; onPacket = null; c }
-        c?.let { try { it.stop() } catch (_: Exception) {}; it.release() }
+    /** 第二路推流用：只编码麦克风（降噪、音量、静音之后，混入其他媒体源之前）。 */
+    fun attachMicEncoder(onConfig: (ByteArray) -> Unit, onPacket: (MediaPacket) -> Unit) = micSink.attach(onConfig, onPacket)
+    fun detachMicEncoder() = micSink.detach()
+
+    /** 一路 AAC 编码器：采集线程送 PCM，编码后回调给 RTMP 发送。 */
+    private inner class AacSink {
+        private val lock = Any()
+        private var codec: MediaCodec? = null
+        private var onConfig: ((ByteArray) -> Unit)? = null
+        private var onPacket: ((MediaPacket) -> Unit)? = null
+        private val info = MediaCodec.BufferInfo()
+        val attached: Boolean get() = codec != null
+
+        fun attach(onConfig: (ByteArray) -> Unit, onPacket: (MediaPacket) -> Unit) {
+            val fmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, channels).apply {
+                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
+                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+            }
+            val c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+            c.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            c.start()
+            // 序列头用标准 AAC-LC AudioSpecificConfig；编码器输出的 csd 到达后再覆盖
+            onConfig(FlvMux.aacSequenceHeader(FlvMux.aacLcConfig(sampleRate, channels)))
+            synchronized(lock) {
+                this.onConfig = onConfig; this.onPacket = onPacket; codec = c
+            }
+        }
+
+        fun detach() {
+            val c = synchronized(lock) { val c = codec; codec = null; onConfig = null; onPacket = null; c }
+            c?.let { try { it.stop() } catch (_: Exception) {}; it.release() }
+        }
+
+        fun encode(bytes: ByteArray, len: Int, ptsNs: Long) {
+            synchronized(lock) {
+                val c = codec ?: return
+                try {
+                    val inIdx = c.dequeueInputBuffer(10_000)
+                    if (inIdx >= 0) {
+                        val ib = c.getInputBuffer(inIdx)!!
+                        ib.clear(); ib.put(bytes, 0, len)
+                        c.queueInputBuffer(inIdx, 0, len, ptsNs / 1000, 0)
+                    }
+                    drain(c)
+                } catch (e: Exception) {
+                    Log.e(TAG, "aac", e)
+                    onError("音频编码失败：${e.message}")
+                }
+            }
+        }
+
+        private fun drain(c: MediaCodec) {
+            while (true) {
+                val idx = c.dequeueOutputBuffer(info, 0)
+                if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    c.outputFormat.getByteBuffer("csd-0")?.let { b ->
+                        val asc = ByteArray(b.remaining()).also { b.get(it) }
+                        onConfig?.invoke(FlvMux.aacSequenceHeader(asc))
+                    }
+                    continue
+                }
+                if (idx < 0) break
+                val ob = c.getOutputBuffer(idx)
+                if (ob != null && info.size > 0) {
+                    ob.position(info.offset); ob.limit(info.offset + info.size)
+                    val raw = ByteArray(info.size).also { ob.get(it) }
+                    if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                        onConfig?.invoke(FlvMux.aacSequenceHeader(raw))
+                    } else {
+                        onPacket?.invoke(MediaPacket(MediaPacket.Type.AUDIO, info.presentationTimeUs, FlvMux.aacFrame(raw), false, false))
+                    }
+                }
+                c.releaseOutputBuffer(idx, false)
+            }
+        }
     }
 
     private fun loop(r: AudioRecord) {
         val samplesPerChunk = 1024 * channels
         val buf = ShortArray(samplesPerChunk)
         val bytes = ByteArray(samplesPerChunk * 2)
+        val micBytes = ByteArray(samplesPerChunk * 2)
         val ts = AudioTimestamp()
         var framesRead = 0L
         var levelAcc = 0.0
         var levelCount = 0
         var startNs = -1L
-        val info = MediaCodec.BufferInfo()
         while (running) {
             val n = r.read(buf, 0, buf.size)
             if (n <= 0) {
@@ -148,6 +208,10 @@ class AudioPipeline(
                 val v = micVolume
                 for (i in 0 until n) buf[i] = (buf[i] * v).toInt().coerceIn(-32768, 32767).toShort()
             }
+            if (micSink.attached) {
+                toBytes(buf, n, micBytes)
+                micSink.encode(micBytes, n * 2, ptsNs)
+            }
             if (!syncTest) mixer.mixInto(buf, frames)
             if (syncTest) {
                 for (f in 0 until frames) {
@@ -157,50 +221,15 @@ class AudioPipeline(
                     for (ch in 0 until channels) buf[f * channels + ch] = v
                 }
             }
-            for (i in 0 until n) {
-                bytes[i * 2] = (buf[i].toInt() and 0xFF).toByte()
-                bytes[i * 2 + 1] = (buf[i].toInt() shr 8).toByte()
-            }
-            synchronized(encoderLock) {
-                val c = codec ?: return@synchronized
-                try {
-                    val inIdx = c.dequeueInputBuffer(10_000)
-                    if (inIdx >= 0) {
-                        val ib = c.getInputBuffer(inIdx)!!
-                        ib.clear(); ib.put(bytes, 0, n * 2)
-                        c.queueInputBuffer(inIdx, 0, n * 2, ptsNs / 1000, 0)
-                    }
-                    drain(c, info)
-                } catch (e: Exception) {
-                    Log.e(TAG, "aac", e)
-                    onError("音频编码失败：${e.message}")
-                }
-            }
+            toBytes(buf, n, bytes)
+            mainSink.encode(bytes, n * 2, ptsNs)
         }
     }
 
-    private fun drain(c: MediaCodec, info: MediaCodec.BufferInfo) {
-        while (true) {
-            val idx = c.dequeueOutputBuffer(info, 0)
-            if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                c.outputFormat.getByteBuffer("csd-0")?.let { b ->
-                    val asc = ByteArray(b.remaining()).also { b.get(it) }
-                    onConfig?.invoke(FlvMux.aacSequenceHeader(asc))
-                }
-                continue
-            }
-            if (idx < 0) break
-            val ob = c.getOutputBuffer(idx)
-            if (ob != null && info.size > 0) {
-                ob.position(info.offset); ob.limit(info.offset + info.size)
-                val raw = ByteArray(info.size).also { ob.get(it) }
-                if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
-                    onConfig?.invoke(FlvMux.aacSequenceHeader(raw))
-                } else {
-                    onPacket?.invoke(MediaPacket(MediaPacket.Type.AUDIO, info.presentationTimeUs, FlvMux.aacFrame(raw), false, false))
-                }
-            }
-            c.releaseOutputBuffer(idx, false)
+    private fun toBytes(src: ShortArray, n: Int, dst: ByteArray) {
+        for (i in 0 until n) {
+            dst[i * 2] = (src[i].toInt() and 0xFF).toByte()
+            dst[i * 2 + 1] = (src[i].toInt() shr 8).toByte()
         }
     }
 

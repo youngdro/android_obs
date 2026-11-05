@@ -8,11 +8,12 @@ import java.io.File
 /**
  * 端到端推流测试：读取 ffmpeg 生成的 Annex-B H.264（带 AUD）与 ADTS AAC，
  * 按真实时间节奏经 RtmpPublisher 推到服务器。
- * 参数：<h264> <aac> <rtmpUrl> [fps] [秒数]
+ * 参数：<h264> <aac 或 -（只推画面）> <rtmpUrl> [fps] [秒数]
  */
 fun main(args: Array<String>) {
     val h264 = File(args[0]).readBytes()
-    val aac = File(args[1]).readBytes()
+    val videoOnly = args[1] == "-"
+    val aac = if (videoOnly) ByteArray(0) else File(args[1]).readBytes()
     val url = RtmpUrl.parse(args[2])
     val fps = args.getOrNull(3)?.toInt() ?: 30
     val seconds = args.getOrNull(4)?.toInt() ?: 10
@@ -61,8 +62,9 @@ fun main(args: Array<String>) {
         override fun onKeyFrameRequested() {}
     }, sslFactory = sslFactory(), log = { println("log: $it") })
     pub.videoConfig = FlvMux.avcSequenceHeader(sps!!, pps!!)
-    pub.audioConfig = FlvMux.aacSequenceHeader(FlvMux.aacLcConfig(sampleRate, channels))
-    pub.start(url, RtmpPublisher.StreamInfo(1280, 720, fps, 2_000_000, sampleRate, channels, 128_000))
+    if (!videoOnly) pub.audioConfig = FlvMux.aacSequenceHeader(FlvMux.aacLcConfig(sampleRate, channels))
+    pub.start(url, if (videoOnly) RtmpPublisher.StreamInfo(1280, 720, fps, 2_000_000, 0, 0, 0)
+        else RtmpPublisher.StreamInfo(1280, 720, fps, 2_000_000, sampleRate, channels, 128_000))
 
     val start = System.nanoTime()
     var vi = 0
@@ -77,7 +79,7 @@ fun main(args: Array<String>) {
             FlvMux.avcFrame(f, key)?.let { pub.enqueue(MediaPacket(MediaPacket.Type.VIDEO, start / 1000 + vi * 1_000_000L / fps, it, key, false)) }
             vi++
         }
-        while (ai * 1024L * 1_000_000L / sampleRate <= nowUs) {
+        while (!videoOnly && ai * 1024L * 1_000_000L / sampleRate <= nowUs) {
             val a = aacFrames[ai % aacFrames.size]
             pub.enqueue(MediaPacket(MediaPacket.Type.AUDIO, start / 1000 + ai * 1024L * 1_000_000L / sampleRate, FlvMux.aacFrame(a), false, false))
             ai++
