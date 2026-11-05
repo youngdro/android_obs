@@ -66,6 +66,9 @@
   .pulse { right: 4vw; bottom: 22vh; width: 18vmin; height: 18vmin; animation: pulse 2s ease-in-out infinite; }
   @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.25; transform: scale(0.85); } }
 
+  .sound { left: 3vw; top: 46vh; font-size: 2.2vmin; padding: 1vmin 2vmin; border-radius: 1vmin; border: 0.3vmin solid #fff;
+    background: rgba(0,0,0,0.35); color: #fff; font-weight: 700; }
+  .sound.on { background: rgba(255,45,85,0.75); }
   canvas { position: absolute; left: 30vw; top: 62vh; width: 40vw; height: 16vh; }
   .canvasLabel { left: 30vw; top: calc(62vh - 3vmin); font-size: 2vmin; text-shadow: 0 0 0.5vmin #000; }
 </style>
@@ -105,6 +108,9 @@
     <span id="counter">计数 0</span>
     <small id="data">数据源：本地模拟</small>
   </div>
+
+  <!-- 声音测试：交互模式下点击，或 URL 加 ?beep=1 自动开始。每秒一声提示音，经音频桥混进直播 -->
+  <button class="abs sound" id="snd">声音测试：关</button>
 
   <!-- 四角标记放在最上层 -->
   <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
@@ -148,6 +154,24 @@
   }
   requestAnimationFrame(tick);
 
+  // ---- 声音测试：Web Audio 每秒一声（高低音交替），用于检查网页声音是否进了直播、音量滑块是否生效 ----
+  let actx = null, beepTimer = null, hi = false;
+  function beep() {
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.frequency.value = (hi = !hi) ? 880 : 660;
+    g.gain.setValueAtTime(0.0001, actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.5, actx.currentTime + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + 0.25);
+    o.connect(g).connect(actx.destination); o.start(); o.stop(actx.currentTime + 0.3);
+  }
+  function setSound(on) {
+    const b = document.getElementById('snd');
+    if (on) { actx = actx || new AudioContext(); actx.resume(); beep(); beepTimer = setInterval(beep, 1000); }
+    else { clearInterval(beepTimer); beepTimer = null; }
+    b.textContent = '声音测试：' + (on ? '开' : '关'); b.classList.toggle('on', on);
+  }
+  document.getElementById('snd').addEventListener('click', () => setSound(!beepTimer));
+
   // ---- 数据更新：WebSocket / HTTP 轮询 / 本地模拟 ----
   const q = new URLSearchParams(location.search);
   const dataEl = document.getElementById('data');
@@ -164,7 +188,9 @@
   } else if (q.get('poll')) {
     setInterval(() => fetch(q.get('poll'), { cache: 'no-store' }).then(r => r.json())
       .then(o => show(o, 'HTTP')).catch(e => dataEl.textContent = '数据源：HTTP 失败 ' + e.message), 1000);
-  } else {
+  }
+  if (q.get('beep') === '1') setSound(true);
+  if (!q.get('ws') && !q.get('poll')) {
     let v = 0;
     setInterval(() => show({ text: '本地模拟数据', value: ++v }, '本地'), 1000);
   }

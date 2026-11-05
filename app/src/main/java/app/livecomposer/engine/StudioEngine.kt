@@ -200,7 +200,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         val m = HashMap<String, Float>()
         for (l in config.layers) when (l.type) {
             LayerType.CAMERA -> m[l.id] = if (config.micMuted) 0f else micLevel
-            LayerType.MEDIA -> if (ready) m[l.id] = audio.mixer.level(l.id)
+            LayerType.MEDIA, LayerType.WEB -> if (ready) m[l.id] = audio.mixer.level(l.id)
             else -> {}
         }
         return m
@@ -362,6 +362,9 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
 
     fun webLayer(): Layer? = config.layers.firstOrNull { it.type == LayerType.WEB }
 
+    /** 隐藏的网页 / 媒体图层不出声（与 OBS 隐藏来源的行为一致）；摄像头图层的声音是麦克风，不受隐藏影响。 */
+    private fun effectiveVolume(l: Layer): Float = if (l.visible || l.type == LayerType.CAMERA) l.volume else 0f
+
     fun cameraLayer(): Layer? = config.layers.firstOrNull { it.type == LayerType.CAMERA }
 
     // ------------------------------------------------------------------ 媒体图层（拉流 / 本地视频）
@@ -371,7 +374,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         compositor.releaseExternalSurface(l.id)
         mediaStatus.remove(l.id)
         if (l.mediaUri.isBlank()) { pushScene(); return }
-        val src = PlayerSource(activity, l.id, l.mediaUri, l.mediaLive, l.loop, audio.mixer, l.volume,
+        val src = PlayerSource(activity, l.id, l.mediaUri, l.mediaLive, l.loop, audio.mixer, effectiveVolume(l),
             object : PlayerSource.Listener {
                 override fun onStateChanged(state: PlayerSource.State, message: String?) {
                     if (players[l.id] == null) return
@@ -454,7 +457,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
                 override fun onViewportMeasured(cssWidth: Int, cssHeight: Int, dpr: Float) {
                     webViewport = "${cssWidth}×$cssHeight"; changed()
                 }
-            })
+            }, audio.mixer, l.id, effectiveVolume(l))
         web = src
         compositor.createExternalSurface(l.id, l.viewportW, l.viewportH) { surface ->
             main.post {
@@ -484,13 +487,11 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         l.name = updated.name; l.x = updated.x; l.y = updated.y; l.w = updated.w; l.h = updated.h
         l.visible = updated.visible; l.locked = updated.locked; l.opacity = updated.opacity
         l.text = updated.text; l.textSizePx = updated.textSizePx; l.textColor = updated.textColor
-        if (l.volume != updated.volume) {
-            l.volume = updated.volume.coerceIn(0f, 2f)
-            if (ready) when (l.type) {
-                LayerType.CAMERA -> audio.micVolume = l.volume
-                LayerType.MEDIA -> players[l.id]?.setVolume(l.volume)
-                else -> {}
-            }
+        l.volume = updated.volume.coerceIn(0f, 2f)
+        if (ready) when (l.type) {
+            LayerType.CAMERA -> audio.micVolume = l.volume
+            LayerType.MEDIA, LayerType.WEB -> audio.mixer.setVolume(l.id, effectiveVolume(l))
+            else -> {}
         }
         pushScene()
         if (persist) config.save(activity)

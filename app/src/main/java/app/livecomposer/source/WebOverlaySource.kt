@@ -23,6 +23,10 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.JavascriptInterface
+import android.util.Base64
+import app.livecomposer.mix.AudioMixer
+import java.nio.ByteBuffer
 import android.widget.FrameLayout
 
 /**
@@ -47,6 +51,11 @@ class WebOverlaySource(
     /** 采集帧率上限（= 输出帧率），避免按屏幕刷新率（60/120Hz）重复绘制。 */
     captureFps: Int,
     private val listener: Listener,
+    /** 网页声音混入这里（null = 不采集网页声音）。 */
+    private val mixer: AudioMixer? = null,
+    /** 在混音器里的源 id（= 图层 id）。 */
+    private val audioId: String = "",
+    audioVolume: Float = 1f,
 ) {
     enum class LoadState(val label: String) { IDLE("未加载"), LOADING("加载中"), READY("已加载"), ERROR("加载失败"), CRASHED("网页进程崩溃") }
 
@@ -59,7 +68,14 @@ class WebOverlaySource(
     }
 
     private val main = Handler(Looper.getMainLooper())
+    init { mixer?.addSource(audioId, audioVolume) }
     private var host: Host? = null
+    private val bridgeScript: String? = if (mixer == null) null else try {
+        context.assets.open("webaudio/bridge.js").bufferedReader().use { it.readText() }
+    } catch (e: Exception) {
+        Log.w(TAG, "bridge.js", e); null
+    }
+    private var documentStartInjected = false
     private var webView: WebView? = null
     @Volatile private var surface: Surface? = null
     private var currentUrl: String? = null
@@ -141,7 +157,8 @@ class WebOverlaySource(
         wv.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
-            mediaPlaybackRequiresUserGesture = true
+            // 网页声音经音频桥混进直播、不外放，允许自动播放（叠加页的提示音、背景音乐）
+            mediaPlaybackRequiresUserGesture = mixer == null
             loadWithOverviewMode = false
             useWideViewPort = false
             setSupportZoom(false)
@@ -161,6 +178,10 @@ class WebOverlaySource(
         wv.isHorizontalScrollBarEnabled = false
         wv.setInitialScale(scalePercent())
         wv.webViewClient = Client()
+        if (bridgeScript != null) {
+            wv.addJavascriptInterface(AudioBridge(), "__lcAudio")
+            documentStartInjected = addDocumentStartScript(wv, bridgeScript)
+        }
         h.addView(wv, FrameLayout.LayoutParams(viewportWidth, viewportHeight))
         host = h
         webView = wv
@@ -217,7 +238,32 @@ class WebOverlaySource(
         e.recycle()
     }
 
+    /** 网页音频桥：JS 送来 16 位交错 PCM（Base64），转给混音器。运行在 WebView 的 JS 桥线程。 */
+    private inner class AudioBridge {
+        private var rate = 0
+        private var channels = 0
+
+        @JavascriptInterface
+        fun pcm(b64: String, sampleRate: Int, ch: Int) {
+            val m = mixer ?: return
+            if (sampleRate <= 0 || ch !in 1..2) return
+            val bytes = try { Base64.decode(b64, Base64.NO_WRAP) } catch (_: Exception) { return }
+            if (sampleRate != rate || ch != channels) {
+                rate = sampleRate; channels = ch
+                m.configure(audioId, sampleRate, ch, AudioMixer.ENCODING_PCM_16BIT)
+            }
+            m.write(audioId, ByteBuffer.wrap(bytes))
+        }
+    }
+
+    /** 不支持文档开始注入的旧 WebView：在页面开始 / 结束时各补注入一次（脚本自身防重复）。 */
+    private fun injectFallback(view: WebView) {
+        val js = bridgeScript ?: return
+        if (!documentStartInjected) view.evaluateJavascript(js, null)
+    }
+
     fun release() {
+        mixer?.removeSource(audioId)
         host?.capturing = false
         webView?.let { it.stopLoading(); it.destroy() }
         host?.let { parent.removeView(it) }
@@ -227,9 +273,11 @@ class WebOverlaySource(
     private inner class Client : WebViewClient() {
         override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
             host?.capturing = false
+            injectFallback(view)
         }
 
         override fun onPageFinished(view: WebView, url: String?) {
+            injectFallback(view)
             val seq = loadSeq
             if (mainFrameError != null) return
             // 等页面首帧真正可绘制后再恢复采集，避免把白屏/半成品推出去
