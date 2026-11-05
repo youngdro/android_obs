@@ -12,7 +12,7 @@ const fs = require('fs');
       for (let i = 0; i < n; i += 2) { let v = (s.charCodeAt(2*i) | (s.charCodeAt(2*i+1) << 8)); if (v > 32767) v -= 65536;
         peak = Math.max(peak, Math.abs(v)); if ((v < 0) !== (prev < 0)) cross++; prev = v; }
       window.__calls.push({ rate, ch, frames: n / 2, peak, cross });
-    } };
+    }, status: (id, json) => { window.__status = JSON.parse(json); } };
   });
   await p.addInitScript({ content: fs.readFileSync(process.argv[2], 'utf8') });
   await p.goto(process.argv[3]);
@@ -26,6 +26,17 @@ const fs = require('fs');
   const el = await p.evaluate(() => window.__calls);
   console.log('Element+WA calls', el.length, JSON.stringify(el.slice(-2)));
   if (!el.some(c => Math.abs(c.peak - 11999) < 300 && Math.abs(c.cross - 61) < 5)) { console.log('FAIL media element'); process.exit(1); }
+  const off = await p.evaluate(() => offline());
+  console.log('offline peak', off);
+  if (!(off > 0.9)) { console.log('FAIL offline context was hijacked'); process.exit(1); }
+  await p.evaluate(() => { window.__calls = []; });
+  console.log('stream', await p.evaluate(() => startStream()));
+  await p.waitForTimeout(1500);
+  const sc = await p.evaluate(() => window.__calls);
+  if (!sc.some(c => c.cross > 30 && c.cross < 50)) { console.log('FAIL MediaStream element'); process.exit(1); }
+  const status = await p.evaluate(() => window.__status);
+  console.log('status', JSON.stringify(status));
+  if (!status || status.el < 1 || status.stream < 1 || status.ctx < 1) { console.log('FAIL status'); process.exit(1); }
   console.log('WEB AUDIO BRIDGE OK');
   await b.close();
 })();

@@ -4,4 +4,10 @@
 window.startWA = () => { const c = new AudioContext(); const o = c.createOscillator(); o.frequency.value = 1000;
   const g = c.createGain(); g.gain.value = 0.5; o.connect(g).connect(c.destination); o.start(); return c.state; };
 window.startEl = () => document.getElementById('a').play().then(()=>'ok').catch(e=>'err '+e);
+window.offline = async () => { const c = new OfflineAudioContext(1, 4800, 48000); const o = c.createOscillator();
+  o.connect(c.destination); o.start(); const buf = await c.startRendering(); let p = 0; const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) p = Math.max(p, Math.abs(d[i])); return p; };
+window.startStream = () => { const c = new AudioContext(); const o = c.createOscillator(); o.frequency.value = 440;
+  const d = c.createMediaStreamDestination(); o.connect(d); o.start();
+  const a = new Audio(); a.srcObject = d.stream; return a.play().then(()=>'ok:' + a.muted).catch(e=>'err '+e); };
 </script></body></html>
