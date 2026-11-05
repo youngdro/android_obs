@@ -114,8 +114,10 @@ fun SettingsPanel(
         }
 
         Section("省电与发热") {
-            SwitchRow("直播时省电", "预览画面降到约 15fps，45 秒无操作自动调暗屏幕（触摸恢复）；推流画面和帧率不受影响", state.powerSave,
+            SwitchRow("直播时省电", "预览画面降到约 15fps；推流画面和帧率不受影响", state.powerSave,
                 { v -> onApply { it.powerSave = v } })
+            SwitchRow("无操作自动调暗屏幕", "直播中 1 分钟无操作把屏幕调暗（不息屏），触摸恢复。默认关闭", state.autoDim,
+                { v -> onApply { it.autoDim = v } })
             Text("网页刷新率（静态网页调低可明显降低发热）", style = MaterialTheme.typography.labelSmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(0 to "跟随输出", 15 to "15fps", 10 to "10fps", 5 to "5fps").forEach { (f, label) ->
