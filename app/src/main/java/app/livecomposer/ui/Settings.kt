@@ -114,6 +114,6 @@ fun SettingsPanel(
                 listOf(0, 90, 180, 270).forEach { d -> Chip("$d°", state.cameraRotationFix == d, { onApply { it.cameraRotationFix = d } }, enabled = !locked) }
             }
         }
-        Text("LiveComposer 0.2 · 直播中切到后台会自动停止推流", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
+        Text("LiveComposer 0.3 · 直播中切到后台会自动停止推流", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
     }
 }

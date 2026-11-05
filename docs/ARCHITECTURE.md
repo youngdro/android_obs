@@ -13,7 +13,7 @@
 后置摄像头 Camera2 ──► SurfaceTexture(OES) ─┐    SurfaceTexture(OES, RGBA 带 Alpha) ◄─┘
                                            ▼                       ▼
                          ┌──────────── 合成线程 Compositor（GLES2，固定帧率时钟）────────────┐
-                         │ FBO(画布 W×H)：清黑 → 摄像头(旋转+等比铺满) → 图层按顺序预乘 Alpha 混合 │
+                         │ FBO(画布 W×H)：清黑 → 图层按顺序预乘 Alpha 混合（摄像头也是图层） │
                          │   网页(OES) / 图片、文字(Bitmap→2D 纹理)    glBlendFunc(ONE, 1-SRC_A) │
                          └───────┬─────────────────────────────────────┬──────────────────┘
                                  │ 同一张 FBO                           │
@@ -36,6 +36,8 @@
 | `rtmp` | `RtmpUrl` `Amf0` `FlvMux` `RtmpConnection` `RtmpPublisher` | 纯 Kotlin，无 Android 依赖：地址解析/脱敏、握手、AMF0 命令、分块、FLV 封装、发送队列、重连、错误分类。可在 JVM 上测试（`verify/`）。 |
 | `gl` | `EglCore` `QuadRenderer` `Compositor` | EGL 上下文、预乘 Alpha 着色器、合成线程、固定帧率时钟、FBO、编码/预览双输出。 |
 | `source` | `CameraSource` `WebOverlaySource` | Camera2（连续 AF、点击对焦、变焦、占用恢复）；离屏网页采集（GPU/CPU 两种模式、冻结防白屏、错误/崩溃处理、视口校准、交互转发）。 |
+| `source` | `PlayerSource` | Media3 ExoPlayer：拉流（HLS/RTMP/RTSP/HTTP-FLV/MP4）与本地视频。画面解码到合成器的 SurfaceTexture；音频经 TeeAudioProcessor 取 PCM 交给混音器，本机输出静音；拉流断线 1/2/5/10 秒重连。 |
+| `mix` | `AudioMixer` | 纯 Kotlin 混音器：各媒体源 PCM 下混/重采样到 48kHz，按音量叠加进麦克风这一路后送 AAC；以麦克风为主时钟，积压超 400ms 裁到 120ms，欠载补静音。可在 JVM 测试（`verify/` 的 `mixerChecks`）。 |
 | `encode` | `VideoEncoder` `AudioPipeline` | MediaCodec H.264（优先硬件）；AudioRecord + AAC，电平、静音、时间戳对齐。 |
 | `stream` | `StreamController` | 串联编码器与推流，统计时长/输出帧率/发送码率/丢帧/重连。 |
 | `core` | `AppConfig` | 画布、图层、网页、摄像头、推流配置持久化；推流地址和 Stream Key 用 Android Keystore AES-GCM 加密保存。 |

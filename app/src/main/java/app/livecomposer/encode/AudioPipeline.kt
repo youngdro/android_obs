@@ -9,6 +9,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.util.Log
+import app.livecomposer.mix.AudioMixer
 import app.livecomposer.rtmp.FlvMux
 import app.livecomposer.rtmp.MediaPacket
 import kotlin.math.log10
@@ -32,6 +33,10 @@ class AudioPipeline(
     private var thread: Thread? = null
     @Volatile private var running = false
     @Volatile var muted = false
+    /** 麦克风音量（即摄像头图层的音量），0..2。 */
+    @Volatile var micVolume = 1f
+    /** 其他媒体源（拉流、本地视频）的声音在这里混入麦克风这一路。 */
+    val mixer = AudioMixer(sampleRate, channels)
     /** 音画同步测试：替换麦克风输入，在每个整秒（MONOTONIC）开始的 50ms 内输出 1kHz 提示音，其余静音。 */
     @Volatile var syncTest = false
 
@@ -125,13 +130,18 @@ class AudioPipeline(
             for (i in 0 until n) { val s = buf[i].toDouble(); sum += s * s }
             levelAcc += sum; levelCount += n
             if (levelCount >= sampleRate / 10) {
-                val rms = sqrt(levelAcc / levelCount) / 32768.0
+                val rms = sqrt(levelAcc / levelCount) / 32768.0 * micVolume
                 val db = if (rms > 0) 20 * log10(rms) else -90.0
                 onLevel(if (muted) 0f else ((db + 60) / 60).toFloat().coerceIn(0f, 1f))
                 levelAcc = 0.0; levelCount = 0
             }
 
             if (muted) java.util.Arrays.fill(buf, 0, n, 0.toShort())
+            else if (micVolume != 1f) {
+                val v = micVolume
+                for (i in 0 until n) buf[i] = (buf[i] * v).toInt().coerceIn(-32768, 32767).toShort()
+            }
+            if (!syncTest) mixer.mixInto(buf, frames)
             if (syncTest) {
                 for (f in 0 until frames) {
                     val t = ptsNs + f * 1_000_000_000L / sampleRate

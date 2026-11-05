@@ -10,6 +10,7 @@ trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
 fail() { echo "FAIL: $*"; exit 1; }
 
 $G urlChecks
+$G mixerChecks
 
 ffmpeg -v error -y -f lavfi -i testsrc2=size=1280x720:rate=30 -t 10 -c:v libx264 -preset veryfast -bf 0 -g 60 \
   -profile:v high -pix_fmt yuv420p -x264-params aud=1 -f h264 "$W/v.h264"

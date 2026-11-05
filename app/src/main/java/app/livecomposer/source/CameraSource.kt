@@ -63,6 +63,11 @@ class CameraSource(context: Context, private val listener: Listener) {
     private var builder: CaptureRequest.Builder? = null
     private var zoom = 1f
     private var wantOpen = false
+    private var target: SurfaceTexture? = null
+    /** 每次打开递增；旧的打开 / 会话回调晚到时据此丢弃，避免快速连续重开（横竖屏切换）时互相打架。 */
+    private var generation = 0
+    /** 会话类错误的自动重试次数（成功后清零）。 */
+    private var autoRetries = 0
 
     @Volatile var state = State.CLOSED; private set
 
@@ -90,11 +95,31 @@ class CameraSource(context: Context, private val listener: Listener) {
 
     fun open(target: SurfaceTexture, size: Size) {
         handler.post {
+            // 先关掉旧会话再动 Surface：旧会话还在往这个 Surface 出帧时释放它会导致新会话启动失败
+            closeInternal()
             target.setDefaultBufferSize(size.width, size.height)
-            surface?.release()
-            surface = Surface(target)
+            if (this.target !== target || surface?.isValid != true) {
+                surface?.release()
+                surface = Surface(target)
+                this.target = target
+            }
             wantOpen = true
+            autoRetries = 0
             openInternal()
+        }
+    }
+
+    /** 会话启动失败时自动重试（0.5、1、2 秒），仍失败才提示用户。 */
+    private fun failOrRetry(gen: Int, msg: String, finalState: State = State.ERROR) {
+        if (gen != generation) return
+        closeInternal()
+        if (wantOpen && autoRetries < 3) {
+            val delay = 500L shl autoRetries
+            autoRetries++
+            setState(State.OPENING, null)
+            handler.postDelayed({ if (gen == generation && wantOpen) openInternal() }, delay)
+        } else {
+            setState(finalState, msg)
         }
     }
 
@@ -102,21 +127,30 @@ class CameraSource(context: Context, private val listener: Listener) {
     private fun openInternal() {
         val id = cameraId ?: run { setState(State.ERROR, "没有找到后置摄像头"); return }
         closeInternal()
+        val gen = ++generation
         setState(State.OPENING, null)
         try {
             manager.openCamera(id, executor, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
+                    if (gen != generation) { camera.close(); return }
                     device = camera
-                    startSession(camera)
+                    startSession(camera, gen)
                 }
 
                 override fun onDisconnected(camera: CameraDevice) {
-                    camera.close(); device = null; session = null
+                    camera.close()
+                    if (gen != generation) return
+                    device = null; session = null
                     setState(State.IN_USE, "摄像头被其他应用占用或已断开，释放后会自动恢复")
                 }
 
                 override fun onError(camera: CameraDevice, error: Int) {
-                    camera.close(); device = null; session = null
+                    camera.close()
+                    if (gen != generation) return
+                    device = null; session = null
+                    if (error == ERROR_CAMERA_DEVICE || error == ERROR_CAMERA_SERVICE) {
+                        failOrRetry(gen, if (error == ERROR_CAMERA_DEVICE) "摄像头设备错误" else "摄像头服务错误"); return
+                    }
                     val msg = when (error) {
                         ERROR_CAMERA_IN_USE, ERROR_MAX_CAMERAS_IN_USE -> "摄像头正被其他应用使用"
                         ERROR_CAMERA_DISABLED -> "摄像头被系统策略禁用"
@@ -124,7 +158,8 @@ class CameraSource(context: Context, private val listener: Listener) {
                         ERROR_CAMERA_SERVICE -> "摄像头服务错误"
                         else -> "摄像头错误 $error"
                     }
-                    setState(if (error == ERROR_CAMERA_IN_USE || error == ERROR_MAX_CAMERAS_IN_USE) State.IN_USE else State.ERROR, msg)
+                    // “被占用”也可能是自己上一次打开的设备还没完全释放（快速重开时），先自动重试几次
+                    failOrRetry(gen, msg, if (error == ERROR_CAMERA_IN_USE || error == ERROR_MAX_CAMERAS_IN_USE) State.IN_USE else State.ERROR)
                 }
             })
         } catch (e: SecurityException) {
@@ -134,11 +169,12 @@ class CameraSource(context: Context, private val listener: Listener) {
         }
     }
 
-    private fun startSession(camera: CameraDevice) {
+    private fun startSession(camera: CameraDevice, gen: Int) {
         val s = surface ?: return
         val cfg = SessionConfiguration(SessionConfiguration.SESSION_REGULAR, listOf(OutputConfiguration(s)), executor,
             object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(sess: CameraCaptureSession) {
+                    if (gen != generation) { sess.close(); return }
                     session = sess
                     try {
                         val b = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
@@ -149,20 +185,21 @@ class CameraSource(context: Context, private val listener: Listener) {
                         builder = b
                         applyZoom(b)
                         sess.setRepeatingRequest(b.build(), null, handler)
+                        autoRetries = 0
                         setState(State.RUNNING, null)
                     } catch (e: Exception) {
-                        setState(State.ERROR, "启动预览失败：${e.message}")
+                        failOrRetry(gen, "启动预览失败：${e.message}")
                     }
                 }
 
                 override fun onConfigureFailed(sess: CameraCaptureSession) {
-                    setState(State.ERROR, "摄像头会话配置失败")
+                    failOrRetry(gen, "摄像头会话配置失败")
                 }
             })
         try {
             camera.createCaptureSession(cfg)
         } catch (e: Exception) {
-            setState(State.ERROR, "摄像头会话创建失败：${e.message}")
+            failOrRetry(gen, "摄像头会话创建失败：${e.message}")
         }
     }
 
@@ -247,10 +284,18 @@ class CameraSource(context: Context, private val listener: Listener) {
         }
     }
 
-    fun retry() = handler.post { if (wantOpen) openInternal() }
+    /** 手动重试：重建 Surface 并重新打开（用于“重试”按钮）。 */
+    fun retry() = handler.post {
+        if (!wantOpen) return@post
+        closeInternal()
+        target?.let { surface?.release(); surface = Surface(it) }
+        autoRetries = 0
+        openInternal()
+    }
 
     fun close() = handler.post {
         wantOpen = false
+        generation++
         closeInternal()
         setState(State.CLOSED, null)
     }

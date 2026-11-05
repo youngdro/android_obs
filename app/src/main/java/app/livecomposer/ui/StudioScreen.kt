@@ -33,6 +33,8 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -40,9 +42,13 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
+import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -88,6 +94,10 @@ class StudioCallbacks(
     val onSyncTest: (Boolean) -> Unit,
     val onRetry: () -> Unit,
     val onConsumeNotice: () -> Unit,
+    val onDeleteLayer: (String) -> Unit,
+    val onAddMedia: (String, Boolean) -> String?,
+    val onPickVideo: () -> Unit,
+    val onMedia: (String, String, Boolean) -> Unit,
 )
 
 class StudioUi {
@@ -194,7 +204,7 @@ private fun Hud(state: EngineState, ui: StudioUi, cb: StudioCallbacks, modifier:
                 GlassChip("丢帧 ${state.droppedFrames}", if (state.droppedFrames > 0) Studio.Warn else Studio.Text)
                 if (state.reconnects > 0) GlassChip("重连 ${state.reconnects}", Studio.Warn)
             }
-            if (state.muted) GlassChip("已静音", Studio.Live)
+            if (state.muted) GlassChip("麦克风已静音", Studio.Live)
         }
         if (ui.showPerf) {
             val m = state.metrics
@@ -223,21 +233,56 @@ private fun Hud(state: EngineState, ui: StudioUi, cb: StudioCallbacks, modifier:
 
 // ---------------------------------------------------------------- 工具栏
 
+/**
+ * 横屏右侧竖排工具栏。开播和麦克风固定在底部，始终可见；
+ * 上半部分放设置、图层、添加，次要入口（网页交互模式、性能信息）收进“更多”，高度不够时上半部分可滚动。
+ */
 @Composable
 private fun Rail(state: EngineState, ui: StudioUi, goLive: () -> Unit, cb: StudioCallbacks) {
     Column(
-        Modifier.width(88.dp).fillMaxHeight().padding(vertical = 12.dp),
+        Modifier.width(84.dp).fillMaxHeight().padding(vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        RoundIconButton(Icons.Rounded.Settings, "设置", { ui.togglePanel(Panel.SETTINGS) }, active = ui.panel == Panel.SETTINGS)
-        RoundIconButton(Icons.Rounded.Layers, "图层", { ui.togglePanel(Panel.LAYERS) }, active = ui.panel == Panel.LAYERS)
-        RoundIconButton(Icons.Rounded.Add, "添加", { ui.togglePanel(Panel.ADD) }, active = ui.panel == Panel.ADD)
-        RoundIconButton(Icons.Rounded.TouchApp, "交互", { ui.interaction = !ui.interaction; ui.selectedId = null }, active = ui.interaction)
-        Spacer(Modifier.weight(1f))
+        Column(
+            Modifier.weight(1f).verticalScroll(rememberScrollState()),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            RoundIconButton(Icons.Rounded.Settings, "设置", { ui.togglePanel(Panel.SETTINGS) }, active = ui.panel == Panel.SETTINGS, size = 42.dp)
+            RoundIconButton(Icons.Rounded.Layers, "图层", { ui.togglePanel(Panel.LAYERS) }, active = ui.panel == Panel.LAYERS, size = 42.dp)
+            RoundIconButton(Icons.Rounded.Add, "添加", { ui.togglePanel(Panel.ADD) }, active = ui.panel == Panel.ADD, size = 42.dp)
+            MoreButton(ui, size = 42.dp)
+        }
+        Spacer(Modifier.height(8.dp))
         MicButton(state, cb.onToggleMute)
-        GoLiveButton(state, goLive)
+        Spacer(Modifier.height(8.dp))
+        GoLiveButton(state, goLive, compact = true)
     }
+}
+
+/** “更多”：网页交互模式、性能信息开关。 */
+@Composable
+private fun MoreButton(ui: StudioUi, size: androidx.compose.ui.unit.Dp = 44.dp) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        RoundIconButton(Icons.Rounded.MoreHoriz, "更多", { open = true },
+            active = open || ui.interaction, size = size)
+        DropdownMenu(open, { open = false }, Modifier.background(Studio.SurfaceHigher)) {
+            MenuRow(Icons.Rounded.TouchApp, if (ui.interaction) "退出网页交互" else "网页交互模式", ui.interaction) {
+                open = false; ui.interaction = !ui.interaction; ui.selectedId = null
+            }
+            MenuRow(Icons.Rounded.Speed, if (ui.showPerf) "隐藏性能信息" else "显示性能信息", ui.showPerf) { open = false; ui.showPerf = !ui.showPerf }
+        }
+    }
+}
+
+@Composable
+private fun MenuRow(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, active: Boolean, onClick: () -> Unit) {
+    DropdownMenuItem(
+        text = { Text(label, color = if (active) Studio.Accent else Studio.Text, fontSize = 14.sp) },
+        leadingIcon = { Icon(icon, null, tint = if (active) Studio.Accent else Studio.TextDim) },
+        onClick = onClick,
+    )
 }
 
 @Composable
@@ -251,8 +296,8 @@ private fun Dock(state: EngineState, ui: StudioUi, goLive: () -> Unit, cb: Studi
         RoundIconButton(Icons.Rounded.Add, "添加", { ui.togglePanel(Panel.ADD) }, active = ui.panel == Panel.ADD)
         GoLiveButton(state, goLive)
         MicButton(state, cb.onToggleMute)
-        RoundIconButton(Icons.Rounded.TouchApp, "交互", { ui.interaction = !ui.interaction; ui.selectedId = null }, active = ui.interaction)
         RoundIconButton(Icons.Rounded.Settings, "设置", { ui.togglePanel(Panel.SETTINGS) }, active = ui.panel == Panel.SETTINGS)
+        MoreButton(ui)
     }
 }
 
@@ -279,7 +324,7 @@ private fun MicButton(state: EngineState, onToggle: () -> Unit) {
 
 /** 开播 / 停播按钮。 */
 @Composable
-private fun GoLiveButton(state: EngineState, onClick: () -> Unit) {
+private fun GoLiveButton(state: EngineState, onClick: () -> Unit, compact: Boolean = false) {
     val live = state.isStreaming
     val pulse = if (live) {
         rememberInfiniteTransition(label = "live").animateFloat(0.35f, 1f, infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "p").value
@@ -290,7 +335,7 @@ private fun GoLiveButton(state: EngineState, onClick: () -> Unit) {
     }
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
-            Modifier.size(68.dp).clip(CircleShape).border(3.dp, color.copy(alpha = if (live) pulse else 1f), CircleShape)
+            Modifier.size(if (compact) 60.dp else 68.dp).clip(CircleShape).border(3.dp, color.copy(alpha = if (live) pulse else 1f), CircleShape)
                 .clickable(onClick = onClick).padding(7.dp),
             contentAlignment = Alignment.Center,
         ) {
@@ -332,10 +377,12 @@ private fun PanelHost(state: EngineState, ui: StudioUi, cb: StudioCallbacks, lan
                 val l = layers.firstOrNull { it.id == ui.selectedId }
                 if (l != null) InspectorPanel(
                     state, l, ui.aspectLock, { ui.aspectLock = it }, cb.onUpdateLayer, cb.onFitText, cb.onWeb,
-                    cb.stage.onReloadWeb, { cb.stage.onRaise(l.id) }, { cb.stage.onLower(l.id) }, { ui.confirmDelete = l.id }, close, panelModifier,
+                    cb.stage.onReloadWeb, cb.onMedia, cb.stage.onReloadMedia, { cb.stage.onRaise(l.id) }, { cb.stage.onLower(l.id) }, { ui.confirmDelete = l.id }, close, panelModifier,
                 )
             }
             Panel.ADD -> AddPanel(state,
+                onAddStream = { url -> cb.onAddMedia(url, true)?.let { ui.selectedId = it; ui.panel = Panel.NONE } },
+                onPickVideo = { cb.onPickVideo(); ui.panel = Panel.NONE },
                 onAddWeb = { url -> cb.onAddWeb(url)?.let { ui.selectedId = it }; ui.panel = Panel.NONE },
                 onPickImage = { cb.onPickImage(); ui.panel = Panel.NONE },
                 onAddText = { t -> cb.onAddText(t)?.let { ui.selectedId = it; ui.panel = Panel.INSPECTOR } },
@@ -368,7 +415,7 @@ private fun Dialogs(state: EngineState, ui: StudioUi, cb: StudioCallbacks) {
             containerColor = Studio.SurfaceHigh,
             title = { Text("删除图层？", color = Studio.Text) },
             text = { Text("“${l?.name ?: ""}”将从画面中移除。", color = Studio.TextDim) },
-            confirmButton = { TextButton({ ui.confirmDelete = null; cb.stage.onDelete(id) }) { Text("删除", color = Studio.Live, fontWeight = FontWeight.Bold) } },
+            confirmButton = { TextButton({ ui.confirmDelete = null; cb.onDeleteLayer(id) }) { Text("删除", color = Studio.Live, fontWeight = FontWeight.Bold) } },
             dismissButton = { TextButton({ ui.confirmDelete = null }) { Text("取消", color = Studio.Text) } },
         )
     }
