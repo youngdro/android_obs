@@ -34,6 +34,7 @@ class PlayerSource(
     fun attach(s: Surface) {}
     fun setVolume(v: Float) {}
     fun pause() {}
+    fun setLoop(value: Boolean) {}
     fun resume() {}
     fun release() {}
 }

@@ -39,6 +39,8 @@ class StudioActivity : ComponentActivity() {
     private var pendingH = 0
     private var initialized = false
     private var started = false
+    /** 选本地视频前在“添加来源”里选的循环设置。 */
+    private var pickLoop = true
 
     private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         if (hasPermissions()) initEngine()
@@ -51,7 +53,7 @@ class StudioActivity : ComponentActivity() {
             contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         } catch (_: SecurityException) {
         }
-        engine.addMediaLayer(uri.toString(), live = false)?.let { ui.selectedId = it.id }
+        engine.addMediaLayer(uri.toString(), live = false, loop = pickLoop)?.let { ui.selectedId = it.id }
     }
 
     private val imagePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
@@ -140,8 +142,8 @@ class StudioActivity : ComponentActivity() {
             onRetry = { engine.retryCapture() },
             onConsumeNotice = { engine.consumeNotice() },
             onDeleteLayer = { id -> engine.deleteLayer(id); if (ui.selectedId == id) ui.selectedId = null },
-            onAddMedia = { uri, live -> engine.addMediaLayer(uri, live)?.id },
-            onPickVideo = { videoPicker.launch(arrayOf("video/*")) },
+            onAddMedia = { uri, live, loop -> engine.addMediaLayer(uri, live, loop)?.id },
+            onPickVideo = { loop -> pickLoop = loop; videoPicker.launch(arrayOf("video/*")) },
             onMedia = { id, uri, loop -> engine.updateMedia(id, uri, loop) },
             scenes = SceneActions(
                 onSave = { name -> engine.saveScene(name) },

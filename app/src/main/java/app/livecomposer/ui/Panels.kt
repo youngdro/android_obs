@@ -163,7 +163,11 @@ private fun layerSubtitle(l: Layer, s: EngineState): String = when (l.type) {
     LayerType.MEDIA -> buildString {
         append(s.media[l.id]?.state?.label ?: "未开始")
         append(" · 音量 ${(l.volume * 100).toInt()}% · ")
-        append(if (l.mediaLive) l.mediaUri.substringAfter("://") else "本地视频")
+        when {
+            l.mediaLive -> append(l.mediaUri.substringAfter("://"))
+            isRemoteUri(l.mediaUri) -> append("网络视频 · ${if (l.loop) "循环" else "单次"} · ${l.mediaUri.substringAfter("://").substringBefore('/')}")
+            else -> append("本地视频 · ${if (l.loop) "循环" else "单次"}")
+        }
     }
     LayerType.WEB -> buildString {
         append(s.webState.label)
@@ -358,11 +362,14 @@ private fun AudioSection(state: EngineState, layer: Layer, onUpdate: (Layer) -> 
     }
 }
 
-/** 拉流 / 本地视频。 */
+private fun isRemoteUri(u: String) = u.startsWith("http://", true) || u.startsWith("https://", true)
+
+/** 拉流 / 本地视频 / 网络视频。 */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MediaSection(state: EngineState, layer: Layer, onMedia: (String, String, Boolean) -> Unit, onReload: (String) -> Unit) {
-    Section(if (layer.mediaLive) "拉流" else "本地视频", trailing = {
+    val remote = !layer.mediaLive && isRemoteUri(layer.mediaUri)
+    Section(when { layer.mediaLive -> "拉流"; remote -> "网络视频"; else -> "本地视频" }, trailing = {
         Text("重新连接", color = Studio.Accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
             modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { onReload(layer.id) }.padding(horizontal = 8.dp, vertical = 2.dp))
     }) {
@@ -386,7 +393,11 @@ private fun MediaSection(state: EngineState, layer: Layer, onMedia: (String, Str
             Field("拉流地址", layer.mediaUri, { onMedia(layer.id, it, layer.loop) }, placeholder = "https://….m3u8 / rtmp:// / rtsp:// / http://….flv")
             Text("支持 HLS（.m3u8）、RTMP、RTSP、HTTP-FLV、HTTP MP4。断线后按 1、2、5、10 秒自动重连。", style = MaterialTheme.typography.bodySmall)
         } else {
-            SwitchRow("循环播放", "播完自动从头开始", layer.loop, { onMedia(layer.id, layer.mediaUri, it) })
+            if (remote) {
+                Field("视频地址", layer.mediaUri, { if (it.isNotBlank()) onMedia(layer.id, it, layer.loop) }, placeholder = "https://…/video.mp4")
+                Text("支持 MP4、WebM、MKV、HLS 点播等。网络中断会自动重连，并从断点继续播放。", style = MaterialTheme.typography.bodySmall)
+            }
+            SwitchRow("循环播放", if (layer.loop) "播完自动从头开始" else "播完停在最后一帧", layer.loop, { onMedia(layer.id, layer.mediaUri, it) })
         }
     }
 }
@@ -426,7 +437,8 @@ private fun TextSection(layer: Layer, onUpdate: (Layer) -> Unit, onFit: (String)
 fun AddPanel(
     state: EngineState,
     onAddStream: (String) -> Unit,
-    onPickVideo: () -> Unit,
+    onAddRemoteVideo: (String, Boolean) -> Unit,
+    onPickVideo: (Boolean) -> Unit,
     onAddWeb: (String) -> Unit,
     onPickImage: () -> Unit,
     onAddText: (String) -> Unit,
@@ -437,6 +449,9 @@ fun AddPanel(
     var text by remember { mutableStateOf("直播合成 LiveComposer") }
     val hasWeb = state.layers.any { it.type == LayerType.WEB }
     var pull by remember { mutableStateOf("") }
+    var videoUrl by remember { mutableStateOf("") }
+    var remoteLoop by remember { mutableStateOf(true) }
+    var localLoop by remember { mutableStateOf(true) }
     val mediaCount = state.layers.count { it.type == LayerType.MEDIA }
     val mediaFull = mediaCount >= MAX_MEDIA_LAYERS
     PanelShell("添加来源", onClose, modifier) {
@@ -446,8 +461,18 @@ fun AddPanel(
                 Chip("添加", pull.isNotBlank(), { if (pull.isNotBlank()) onAddStream(pull) }, enabled = pull.isNotBlank())
             }
         }
-        SourceCard(LayerType.MEDIA, "本地视频", if (mediaFull) "最多 $MAX_MEDIA_LAYERS 路媒体，已满" else "手机里的视频文件，默认循环播放") {
-            if (!mediaFull) Chip("从相册 / 文件选择", false, onPickVideo)
+        SourceCard(LayerType.MEDIA, "本地视频", if (mediaFull) "最多 $MAX_MEDIA_LAYERS 路媒体，已满" else "手机里的视频文件") {
+            if (!mediaFull) {
+                SwitchRow("循环播放", if (localLoop) "播完自动从头开始" else "播完停在最后一帧", localLoop, { localLoop = it })
+                Chip("从相册 / 文件选择", false, { onPickVideo(localLoop) })
+            }
+        }
+        SourceCard(LayerType.MEDIA, "网络视频", if (mediaFull) "最多 $MAX_MEDIA_LAYERS 路媒体，已满" else "远程视频文件地址（MP4 / WebM / HLS 点播等）") {
+            if (!mediaFull) {
+                Field("视频地址", videoUrl, { videoUrl = it }, placeholder = "https://…/video.mp4", onChange = { videoUrl = it })
+                SwitchRow("循环播放", if (remoteLoop) "播完自动从头开始" else "播完停在最后一帧", remoteLoop, { remoteLoop = it })
+                Chip("添加", videoUrl.isNotBlank(), { if (videoUrl.isNotBlank()) onAddRemoteVideo(videoUrl, remoteLoop) }, enabled = videoUrl.isNotBlank())
+            }
         }
         SourceCard(LayerType.WEB, "网页", if (hasWeb) "首版支持一个网页图层，已存在" else "透明背景网页：文字、图片、动画、实时数据") {
             if (!hasWeb) {
