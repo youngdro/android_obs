@@ -106,6 +106,8 @@ data class AppConfig(
     var allowCleartextWeb: Boolean = false,
     var webCaptureGpu: Boolean = true,
     var cameraRotationFix: Int = 0,
+    /** 麦克风本地降噪，默认开启。 */
+    var noiseSuppression: Boolean = true,
     val layers: MutableList<Layer> = mutableListOf(),
 ) {
     val canvasWidth get() = if (orientation == CanvasOrientation.LANDSCAPE) resolution.long else resolution.short
@@ -133,6 +135,7 @@ data class AppConfig(
                 c.allowCleartextWeb = o.optBoolean("allowCleartextWeb")
                 c.webCaptureGpu = o.optBoolean("webCaptureGpu", true)
                 c.cameraRotationFix = o.optInt("cameraRotationFix", 0)
+                c.noiseSuppression = o.optBoolean("noiseSuppression", true)
                 val arr = o.optJSONArray("layers") ?: JSONArray()
                 for (i in 0 until arr.length()) c.layers.add(Layer.fromJson(arr.getJSONObject(i)))
             } catch (_: Exception) {
@@ -197,7 +200,7 @@ data class AppConfig(
             put("videoBitrateKbps", videoBitrateKbps); put("keyFrameIntervalSec", keyFrameIntervalSec)
             put("useFullUrl", useFullUrl); put("serverUrl", serverUrl); put("zoom", zoom.toDouble())
             put("micMuted", micMuted); put("allowCleartextWeb", allowCleartextWeb); put("webCaptureGpu", webCaptureGpu)
-            put("cameraRotationFix", cameraRotationFix)
+            put("cameraRotationFix", cameraRotationFix); put("noiseSuppression", noiseSuppression)
             put("layers", JSONArray().apply { layers.forEach { put(it.toJson()) } })
         }
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()

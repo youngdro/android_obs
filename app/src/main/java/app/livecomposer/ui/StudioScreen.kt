@@ -406,7 +406,7 @@ private fun PanelHost(state: EngineState, ui: StudioUi, cb: StudioCallbacks, lan
                 val l = layers.firstOrNull { it.id == ui.selectedId }
                 if (l != null) InspectorPanel(
                     state, l, ui.aspectLock, { ui.aspectLock = it }, cb.onUpdateLayer, cb.onFitText, cb.onWeb,
-                    cb.stage.onReloadWeb, cb.onMedia, cb.stage.onReloadMedia, { cb.stage.onRaise(l.id) }, { cb.stage.onLower(l.id) }, { ui.confirmDelete = l.id }, close, panelModifier,
+                    cb.stage.onReloadWeb, cb.onMedia, cb.stage.onReloadMedia, { v -> cb.onApply { it.noiseSuppression = v } }, { cb.stage.onRaise(l.id) }, { cb.stage.onLower(l.id) }, { ui.confirmDelete = l.id }, close, panelModifier,
                 )
             }
             Panel.ADD -> AddPanel(state,
