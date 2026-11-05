@@ -108,6 +108,11 @@ fun SettingsPanel(
                 { v -> onApply { it.noiseSuppression = v } })
         }
 
+        Section("声音") {
+            SwitchRow("网页和视频的声音在手机上也播放", "默认关闭：只进推流，手机不出声。打开后注意麦克风回声，建议戴耳机", state.monitorLocal,
+                { v -> onApply { it.monitorLocal = v } })
+        }
+
         Section("省电与发热") {
             SwitchRow("直播时省电", "预览画面降到约 15fps，45 秒无操作自动调暗屏幕（触摸恢复）；推流画面和帧率不受影响", state.powerSave,
                 { v -> onApply { it.powerSave = v } })
@@ -134,6 +139,8 @@ fun SettingsPanel(
                 listOf(0, 90, 180, 270).forEach { d -> Chip("$d°", state.cameraRotationFix == d, { onApply { it.cameraRotationFix = d } }, enabled = !locked) }
             }
         }
-        Text("LiveComposer 0.6 · 直播中切到后台会自动停止推流", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
+        val ctx = androidx.compose.ui.platform.LocalContext.current
+        val ver = remember { runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() ?: "" }
+        Text("LiveComposer $ver · 直播中切到后台会自动停止推流", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
     }
 }

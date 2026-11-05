@@ -90,6 +90,7 @@ data class EngineState(
     /** 网页声音接管情况。 */
     val webAudio: String?,
     val powerSave: Boolean,
+    val monitorLocal: Boolean,
     /** 网页采集帧率，0 = 跟随输出。 */
     val webCaptureFps: Int,
     val webGpu: Boolean,
@@ -191,7 +192,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
             zoom = config.zoom,
             zoomMin = if (ready) camera.zoomRange.lower else 1f, zoomMax = if (ready) camera.zoomRange.upper else 1f,
             syncTest = syncTest, noiseSuppression = config.noiseSuppression, webAudio = webAudio,
-            powerSave = config.powerSave, webCaptureFps = config.webCaptureFps, webGpu = config.webCaptureGpu, allowCleartext = config.allowCleartextWeb,
+            powerSave = config.powerSave, monitorLocal = config.monitorLocal, webCaptureFps = config.webCaptureFps, webGpu = config.webCaptureGpu, allowCleartext = config.allowCleartextWeb,
             cameraRotationFix = config.cameraRotationFix,
             useFullUrl = config.useFullUrl, fullUrl = config.fullUrl, serverUrl = config.serverUrl, streamKey = config.streamKey,
             availableResolutions = availableResolutions(),
@@ -411,6 +412,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
                 }
             })
         players[l.id] = src
+        src.setMonitor(monitorVolume(l))
         mediaStatus[l.id] = MediaStatus(PlayerSource.State.CONNECTING, null, 0, 0)
         compositor.createExternalSurface(l.id, 1280, 720) { surface ->
             main.post { if (players[l.id] === src) { src.attach(surface); if (!started) src.pause() } }
@@ -492,6 +494,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
                 }
             }, audio.mixer, l.id, effectiveVolume(l))
         web = src
+        src.monitorGain = monitorVolume(l)
         compositor.createExternalSurface(l.id, l.viewportW, l.viewportH) { surface ->
             main.post {
                 if (web !== src) return@post
@@ -523,7 +526,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         l.volume = updated.volume.coerceIn(0f, 2f)
         if (ready) when (l.type) {
             LayerType.CAMERA -> audio.micVolume = l.volume
-            LayerType.MEDIA, LayerType.WEB -> audio.mixer.setVolume(l.id, effectiveVolume(l))
+            LayerType.MEDIA, LayerType.WEB -> { audio.mixer.setVolume(l.id, effectiveVolume(l)); applyMonitor() }
             else -> {}
         }
         pushScene()
@@ -732,6 +735,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         if (!ready) { changed(); return }
         audio.noiseReducer.enabled = config.noiseSuppression
         web?.setCaptureFps(webFpsTarget())
+        applyMonitor()
         updatePowerSave()
         if (oldW != newW || oldH != newH || oldFps != config.fps) compositor.configure(newW, newH, config.fps)
         if (oldW != newW || oldH != newH || oldGpu != config.webCaptureGpu || oldHttp != config.allowCleartextWeb || oldFps != config.fps) setupWebLayer()
@@ -930,6 +934,17 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
             checkThermal()
             changed()
             main.postDelayed(this, 1000)
+        }
+    }
+
+    /** 本机监听音量：开启“在手机上也播放”时跟随图层音量（最高 100%），否则 0。 */
+    private fun monitorVolume(l: Layer): Float = if (config.monitorLocal) effectiveVolume(l).coerceAtMost(1f) else 0f
+
+    private fun applyMonitor() {
+        for (l in config.layers) when (l.type) {
+            LayerType.MEDIA -> players[l.id]?.setMonitor(monitorVolume(l))
+            LayerType.WEB -> web?.monitorGain = monitorVolume(l)
+            else -> {}
         }
     }
 

@@ -27,6 +27,17 @@
 
   var origConnect = AudioNode.prototype.connect;
   var taps = new WeakMap();
+  var allTaps = [];
+  // 本机监听音量：App 设置“在手机上也播放”时 > 0，默认 0（只进推流、不外放）
+  var monitor = 0;
+  function readMonitor() {
+    var g = 0;
+    try { g = +B.monitor() || 0; } catch (_) {}
+    if (g !== monitor) {
+      monitor = g;
+      for (var i = 0; i < allTaps.length; i++) allTaps[i].mute.gain.value = g;
+    }
+  }
 
   function toB64(i16) {
     var u8 = new Uint8Array(i16.buffer), s = '', CH = 0x8000;
@@ -39,8 +50,9 @@
     if (t) return t;
     var sp = ctx.createScriptProcessor(2048, 2, 2);
     var mute = ctx.createGain();
-    mute.gain.value = 0;
-    t = { node: sp, active: false };
+    mute.gain.value = monitor;
+    t = { node: sp, mute: mute, active: false };
+    allTaps.push(t);
     sp.onaudioprocess = function (e) {
       var ib = e.inputBuffer;
       var L = ib.getChannelData(0), R = ib.numberOfChannels > 1 ? ib.getChannelData(1) : L;
@@ -132,5 +144,7 @@
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', scan); else scan();
     setInterval(scan, 2000);
   }
+  readMonitor();
+  setInterval(readMonitor, 500);
   report();
 })();

@@ -261,6 +261,9 @@ class WebOverlaySource(
     }
 
     /** 网页音频桥：JS 送来 16 位交错 PCM（Base64），转给混音器。运行在 WebView 的 JS 桥线程。 */
+    /** 本机监听音量（0 = 不外放，只进推流）。网页里的音频桥每 0.5 秒读取一次。 */
+    @Volatile var monitorGain = 0f
+
     /** 各 frame（含 iframe）报来的接管情况，页面切换时清空。 */
     private val audioFrames = java.util.concurrent.ConcurrentHashMap<String, IntArray>()
     @Volatile private var audioErr: String = ""
@@ -280,6 +283,9 @@ class WebOverlaySource(
     private inner class AudioBridge {
         private var rate = 0
         private var channels = 0
+
+        @JavascriptInterface
+        fun monitor(): Float = monitorGain
 
         @JavascriptInterface
         fun status(frameId: String, json: String) {
