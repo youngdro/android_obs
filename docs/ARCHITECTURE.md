@@ -41,6 +41,7 @@
 | `encode` | `VideoEncoder` `AudioPipeline` | MediaCodec H.264（优先硬件）；AudioRecord + AAC，电平、静音、时间戳对齐。 |
 | `stream` | `StreamController` | 串联编码器与推流，统计时长/输出帧率/发送码率/丢帧/重连。 |
 | `core` | `AppConfig` | 画布、图层、网页、摄像头、推流配置持久化；推流地址和 Stream Key 用 Android Keystore AES-GCM 加密保存。 |
+| `core` | `Scenes`（`Scene` `SceneStore`） | 场景方案：图层与画布/编码设置的快照，单独存放；切换时引擎释放并重建网页、媒体、图片/文字来源，直播中只切换图层并按当前画布换算位置。推流地址和密钥不进入场景。 |
 | `engine` | `StudioEngine` | 界面无关的引擎门面：串起合成、摄像头、网页、音频、推流与配置，对外提供不可变快照 `EngineState`。以后抽 Rust 核心时，这一层就是边界。 |
 | `ui` | `StudioActivity` `StudioScreen` `Stage` `Panels` `Settings` `Components` `Theme` | Jetpack Compose 界面：横竖屏两套布局；舞台上长按选中图层、拖动、八向手柄缩放、边缘/中心吸附辅助线、双指缩放；图层、属性、添加、设置面板。 |
 

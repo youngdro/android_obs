@@ -31,9 +31,16 @@ data class RtmpUrl(
             else -> key.take(2) + "****" + key.takeLast(2)
         }
 
+        /**
+         * 清理粘贴进来的地址：去掉所有空白（含换行、全角空格）、从网页复制时带出的 &amp; 实体。
+         * 鉴权参数（如阿里云 ?auth_key=…&md5key=…）原样保留在 Stream name 里。
+         */
+        fun sanitize(s: String): String =
+            s.replace(Regex("[\\s\u3000\u200B]"), "").replace("&amp;", "&")
+
         @Throws(RtmpUrlException::class)
         fun parse(full: String): RtmpUrl {
-            val (secure, host, port, path) = splitBase(full.trim())
+            val (secure, host, port, path) = splitBase(sanitize(full))
             val slash = path.indexOf('/')
             if (slash <= 0 || slash == path.length - 1) {
                 throw RtmpUrlException("推流地址缺少应用名或 Stream Key，格式应为 rtmp://服务器/应用名/密钥")
@@ -43,9 +50,12 @@ data class RtmpUrl(
 
         @Throws(RtmpUrlException::class)
         fun fromServerAndKey(server: String, key: String): RtmpUrl {
-            val k = key.trim().trimStart('/')
-            if (k.isEmpty()) throw RtmpUrlException("Stream Key 不能为空")
-            val (secure, host, port, path) = splitBase(server.trim().trimEnd('/'))
+            val k = sanitize(key).trimStart('/')
+            // 把完整地址粘进了“服务器”、密钥留空：按完整地址解析
+            if (k.isEmpty()) {
+                return try { parse(server) } catch (_: RtmpUrlException) { throw RtmpUrlException("Stream Key 不能为空") }
+            }
+            val (secure, host, port, path) = splitBase(sanitize(server).trimEnd('/'))
             if (path.isEmpty()) throw RtmpUrlException("服务器地址缺少应用名，例如 rtmp://example.com/live")
             return RtmpUrl(secure, host, port, path, k)
         }

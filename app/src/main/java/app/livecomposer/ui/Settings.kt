@@ -55,14 +55,18 @@ fun SettingsPanel(
                 { v -> onApply { it.useFullUrl = v } }, enabled = !locked)
             if (state.useFullUrl) {
                 Field("推流地址", state.fullUrl, { v -> onApply { it.fullUrl = v.trim() } },
-                    placeholder = "rtmp(s)://服务器/应用名/串流密钥", secret = true, enabled = !locked, error = urlError)
+                    placeholder = "rtmp(s)://服务器/应用名/串流密钥?鉴权参数", secret = true, enabled = !locked, error = urlError,
+                    onChange = { v -> onApply { it.fullUrl = v.trim() } })
             } else {
                 Field("服务器地址", state.serverUrl, { v -> onApply { it.serverUrl = v.trim() } },
-                    placeholder = "rtmp(s)://服务器/应用名", enabled = !locked, error = urlError)
+                    placeholder = "rtmp(s)://服务器/应用名", enabled = !locked, error = urlError,
+                    onChange = { v -> onApply { it.serverUrl = v.trim() } })
                 Field("串流密钥 Stream Key", state.streamKey, { v -> onApply { it.streamKey = v.trim() } },
-                    placeholder = "加密保存，日志中脱敏", secret = true, enabled = !locked)
+                    placeholder = "流名?鉴权参数，加密保存，日志中脱敏", secret = true, enabled = !locked,
+                    onChange = { v -> onApply { it.streamKey = v.trim() } })
             }
-            Text("支持 RTMP 与 RTMPS。断线后按 1、2、5、10 秒自动重连，网络恢复时立即重连。", style = MaterialTheme.typography.bodySmall)
+            Text("支持 RTMP 与 RTMPS，地址可带鉴权参数（如 ?auth_key=…&md5key=…）。输入即保存（加密）。断线后按 1、2、5、10 秒自动重连，网络恢复时立即重连。",
+                style = MaterialTheme.typography.bodySmall)
         }
 
         Section("画布") {
@@ -114,6 +118,6 @@ fun SettingsPanel(
                 listOf(0, 90, 180, 270).forEach { d -> Chip("$d°", state.cameraRotationFix == d, { onApply { it.cameraRotationFix = d } }, enabled = !locked) }
             }
         }
-        Text("LiveComposer 0.3 · 直播中切到后台会自动停止推流", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
+        Text("LiveComposer 0.4 · 直播中切到后台会自动停止推流", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
     }
 }

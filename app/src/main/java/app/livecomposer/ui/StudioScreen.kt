@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -39,6 +40,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Collections
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
@@ -75,7 +78,7 @@ import app.livecomposer.core.Layer
 import app.livecomposer.engine.EngineState
 import app.livecomposer.engine.LiveState
 
-enum class Panel { NONE, LAYERS, INSPECTOR, ADD, SETTINGS }
+enum class Panel { NONE, LAYERS, INSPECTOR, ADD, SETTINGS, SCENES }
 
 /** 界面对引擎的全部操作。 */
 class StudioCallbacks(
@@ -98,6 +101,7 @@ class StudioCallbacks(
     val onAddMedia: (String, Boolean) -> String?,
     val onPickVideo: () -> Unit,
     val onMedia: (String, String, Boolean) -> Unit,
+    val scenes: SceneActions,
 )
 
 class StudioUi {
@@ -109,6 +113,7 @@ class StudioUi {
     var urlError by mutableStateOf<String?>(null)
     var confirmStop by mutableStateOf(false)
     var confirmDelete by mutableStateOf<String?>(null)
+    var confirmDeleteScene by mutableStateOf<String?>(null)
     var backgroundStopped by mutableStateOf(false)
 }
 
@@ -189,6 +194,7 @@ private fun StageArea(state: EngineState, ui: StudioUi, cb: StudioCallbacks, mod
 private fun Hud(state: EngineState, ui: StudioUi, cb: StudioCallbacks, modifier: Modifier) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            SceneChip(state, ui)
             val d = state.durationSec
             val time = "%02d:%02d:%02d".format(d / 3600, d / 60 % 60, d % 60)
             when (state.live) {
@@ -228,6 +234,27 @@ private fun Hud(state: EngineState, ui: StudioUi, cb: StudioCallbacks, modifier:
                 }
             }
         }
+    }
+}
+
+/** 顶部的场景入口：显示当前场景名，点开场景面板快速切换。 */
+@Composable
+private fun SceneChip(state: EngineState, ui: StudioUi) {
+    val name = state.scenes.firstOrNull { it.id == state.activeSceneId }?.name ?: "未保存的场景"
+    val active = ui.panel == Panel.SCENES
+    Row(
+        Modifier.clip(RoundedCornerShape(50)).background(if (active) Studio.AccentDim else Studio.Glass)
+            .border(1.dp, if (active) Studio.Accent else Studio.Outline, RoundedCornerShape(50))
+            .clickable { ui.togglePanel(Panel.SCENES) }
+            .padding(start = 8.dp, end = 10.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Rounded.Collections, null, tint = Studio.Accent, modifier = Modifier.size(14.dp))
+        Spacer(Modifier.width(5.dp))
+        Text(name, color = Studio.Text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+            modifier = Modifier.widthIn(max = 140.dp))
+        Spacer(Modifier.width(2.dp))
+        Icon(Icons.Rounded.ExpandMore, null, tint = Studio.TextDim, modifier = Modifier.size(14.dp))
     }
 }
 
@@ -389,6 +416,11 @@ private fun PanelHost(state: EngineState, ui: StudioUi, cb: StudioCallbacks, lan
                 onClose = close, modifier = panelModifier)
             Panel.SETTINGS -> SettingsPanel(state, ui.urlError, { edit -> cb.onApply(edit); ui.urlError = null },
                 cb.onSyncTest, ui.showPerf, { ui.showPerf = it }, close, panelModifier)
+            Panel.SCENES -> ScenesPanel(state, SceneActions(
+                onSave = cb.scenes.onSave, onOverwrite = cb.scenes.onOverwrite,
+                onApply = { id -> ui.selectedId = null; cb.scenes.onApply(id) },
+                onRename = cb.scenes.onRename, onDelete = { id -> ui.confirmDeleteScene = id }, onMove = cb.scenes.onMove,
+            ), close, panelModifier)
             Panel.NONE -> {}
         }
     }
@@ -417,6 +449,17 @@ private fun Dialogs(state: EngineState, ui: StudioUi, cb: StudioCallbacks) {
             text = { Text("“${l?.name ?: ""}”将从画面中移除。", color = Studio.TextDim) },
             confirmButton = { TextButton({ ui.confirmDelete = null; cb.onDeleteLayer(id) }) { Text("删除", color = Studio.Live, fontWeight = FontWeight.Bold) } },
             dismissButton = { TextButton({ ui.confirmDelete = null }) { Text("取消", color = Studio.Text) } },
+        )
+    }
+    ui.confirmDeleteScene?.let { id ->
+        val sc = state.scenes.firstOrNull { it.id == id }
+        AlertDialog(
+            onDismissRequest = { ui.confirmDeleteScene = null },
+            containerColor = Studio.SurfaceHigh,
+            title = { Text("删除场景？", color = Studio.Text) },
+            text = { Text("“${sc?.name ?: ""}”将被删除，当前画面不受影响。", color = Studio.TextDim) },
+            confirmButton = { TextButton({ ui.confirmDeleteScene = null; cb.scenes.onDelete(id) }) { Text("删除", color = Studio.Live, fontWeight = FontWeight.Bold) } },
+            dismissButton = { TextButton({ ui.confirmDeleteScene = null }) { Text("取消", color = Studio.Text) } },
         )
     }
     if (ui.backgroundStopped) {
