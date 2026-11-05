@@ -12,12 +12,22 @@ import app.livecomposer.rtmp.RtmpException
 import app.livecomposer.rtmp.RtmpPublisher
 import app.livecomposer.rtmp.RtmpUrl
 
-/** 串联「合成器 → 视频编码 / 音频编码 → RTMP」并统计运行状态。所有回调在主线程。 */
+/**
+ * 串联「合成器 → 视频编码 / 音频编码 → RTMP」并统计运行状态。所有回调在主线程。
+ *
+ * - [Kind.MAIN]：主推流，合成后的画面 + 混音；
+ * - [Kind.CAMERA]：第二路，纯摄像头画面 + 可选的麦克风原声。与主推流各自独立启停、独立重连。
+ */
 class StreamController(
     private val compositor: Compositor,
     private val audio: AudioPipeline,
     private val listener: Listener,
+    private val kind: Kind = Kind.MAIN,
 ) {
+    enum class Kind { MAIN, CAMERA }
+
+    /** 本路是否带声音（主推流总是带；第二路可选）。 */
+    private var withAudio = true
     data class Stats(
         val state: RtmpPublisher.State,
         val durationSec: Long,
@@ -44,9 +54,10 @@ class StreamController(
     private var message: String? = null
     val isActive: Boolean get() = publisher != null
 
-    fun start(url: RtmpUrl, width: Int, height: Int, fps: Int, bitrate: Int, gopSec: Int) {
+    fun start(url: RtmpUrl, width: Int, height: Int, fps: Int, bitrate: Int, gopSec: Int, withAudio: Boolean = true) {
         if (publisher != null) return
         message = null
+        this.withAudio = kind == Kind.MAIN || withAudio
         val pub = RtmpPublisher(object : RtmpPublisher.Listener {
             override fun onStateChanged(state: RtmpPublisher.State, error: RtmpException?, retryInMs: Long) {
                 main.post {
@@ -74,20 +85,21 @@ class StreamController(
             listener.onStreamEnded("${RtmpErrorKind.ENCODER.label}：无法启动 H.264 编码器（${e.message}）")
             return
         }
-        compositor.setEncoderSurface(v.inputSurface)
+        setVideoTarget(v.inputSurface, width, height)
         try {
-            audio.attachEncoder(onConfig = { pub.audioConfig = it }, onPacket = { pub.enqueue(it) })
+            if (this.withAudio) attachAudio(onConfig = { pub.audioConfig = it }, onPacket = { pub.enqueue(it) })
         } catch (e: Exception) {
-            compositor.setEncoderSurface(null); v.stop()
+            setVideoTarget(null, 0, 0); v.stop()
             listener.onStreamEnded("${RtmpErrorKind.ENCODER.label}：无法启动 AAC 编码器（${e.message}）")
             return
         }
         video = v
         publisher = pub
-        pub.start(url, RtmpPublisher.StreamInfo(width, height, fps, bitrate, audio.sampleRate, audio.channels, audio.bitrate))
+        pub.start(url, if (this.withAudio) RtmpPublisher.StreamInfo(width, height, fps, bitrate, audio.sampleRate, audio.channels, audio.bitrate)
+            else RtmpPublisher.StreamInfo(width, height, fps, bitrate, 0, 0, 0))
         startedAt = SystemClock.elapsedRealtime()
         lastTick = startedAt; lastBytes = 0; lastFrames = 0
-        Log.i(TAG, "start ${url.masked()} ${width}x$height@$fps ${bitrate / 1000}kbps encoder=${v.codecName}")
+        Log.i(TAG, "start[$kind] ${url.masked()} ${width}x$height@$fps ${bitrate / 1000}kbps encoder=${v.codecName}")
         main.post(statsTick)
     }
 
@@ -97,7 +109,7 @@ class StreamController(
             val now = SystemClock.elapsedRealtime()
             val dt = (now - lastTick).coerceAtLeast(1) / 1000f
             val bytes = pub.bytesSent
-            val frames = compositor.encodedFrames
+            val frames = if (kind == Kind.MAIN) compositor.encodedFrames else compositor.cameraEncodedFrames
             val stats = Stats(
                 state = pub.state,
                 durationSec = (now - startedAt) / 1000,
@@ -123,12 +135,20 @@ class StreamController(
         publisher = null
         main.removeCallbacks(statsTick)
         // 停止顺序：先断开合成器输出，再停编码器，最后关闭连接
-        compositor.setEncoderSurface(null)
-        audio.detachEncoder()
+        setVideoTarget(null, 0, 0)
+        if (withAudio) detachAudio()
         video?.stop(); video = null
         Thread { pub.stop() }.start()
         listener.onStreamEnded(error)
     }
+
+    private fun setVideoTarget(s: android.view.Surface?, w: Int, h: Int) =
+        if (kind == Kind.MAIN) compositor.setEncoderSurface(s) else compositor.setCameraEncoderSurface(s, w, h)
+
+    private fun attachAudio(onConfig: (ByteArray) -> Unit, onPacket: (app.livecomposer.rtmp.MediaPacket) -> Unit) =
+        if (kind == Kind.MAIN) audio.attachEncoder(onConfig, onPacket) else audio.attachMicEncoder(onConfig, onPacket)
+
+    private fun detachAudio() = if (kind == Kind.MAIN) audio.detachEncoder() else audio.detachMicEncoder()
 
     companion object {
         private const val TAG = "StreamController"

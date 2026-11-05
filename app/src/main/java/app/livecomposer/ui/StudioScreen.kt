@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
@@ -78,7 +79,7 @@ import app.livecomposer.core.Layer
 import app.livecomposer.engine.EngineState
 import app.livecomposer.engine.LiveState
 
-enum class Panel { NONE, LAYERS, INSPECTOR, ADD, SETTINGS, SCENES }
+enum class Panel { NONE, LAYERS, INSPECTOR, ADD, SETTINGS, SCENES, CAMSTREAM }
 
 /** 界面对引擎的全部操作。 */
 class StudioCallbacks(
@@ -104,6 +105,7 @@ class StudioCallbacks(
     val onPickVideo: (Boolean) -> Unit,
     val onMedia: (String, String, Boolean) -> Unit,
     val scenes: SceneActions,
+    val camStream: CamStreamActions,
 )
 
 class StudioUi {
@@ -195,8 +197,9 @@ private fun StageArea(state: EngineState, ui: StudioUi, cb: StudioCallbacks, mod
 @Composable
 private fun Hud(state: EngineState, ui: StudioUi, cb: StudioCallbacks, modifier: Modifier) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             SceneChip(state, ui)
+            CamStreamChip(state, ui.panel == Panel.CAMSTREAM) { ui.togglePanel(Panel.CAMSTREAM) }
             val d = state.durationSec
             val time = "%02d:%02d:%02d".format(d / 3600, d / 60 % 60, d % 60)
             when (state.live) {
@@ -424,6 +427,7 @@ private fun PanelHost(state: EngineState, ui: StudioUi, cb: StudioCallbacks, lan
                 onApply = { id -> ui.selectedId = null; cb.scenes.onApply(id) },
                 onRename = cb.scenes.onRename, onDelete = { id -> ui.confirmDeleteScene = id }, onMove = cb.scenes.onMove,
             ), close, panelModifier)
+            Panel.CAMSTREAM -> CamStreamPanel(state, cb.camStream, close, panelModifier)
             Panel.NONE -> {}
         }
     }

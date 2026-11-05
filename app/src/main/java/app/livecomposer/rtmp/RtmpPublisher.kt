@@ -168,15 +168,18 @@ class RtmpPublisher(
     }
 
     private fun sendLoop(c: RtmpConnection, info: StreamInfo) {
-        c.sendMetadata(linkedMapOf(
+        val meta = linkedMapOf<String, Any>(
             "width" to info.width, "height" to info.height,
             "videocodecid" to 7, "videodatarate" to info.videoBitrate / 1000.0,
             "framerate" to info.fps,
-            "audiocodecid" to 10, "audiodatarate" to info.audioBitrate / 1000.0,
-            "audiosamplerate" to info.audioSampleRate, "audiosamplesize" to 16,
-            "stereo" to (info.audioChannels == 2),
-            "encoder" to "LiveComposer",
-        ))
+        )
+        if (info.audioSampleRate > 0) { // 0 = 只推画面（第二路关闭声音时）
+            meta["audiocodecid"] = 10; meta["audiodatarate"] = info.audioBitrate / 1000.0
+            meta["audiosamplerate"] = info.audioSampleRate; meta["audiosamplesize"] = 16
+            meta["stereo"] = info.audioChannels == 2
+        }
+        meta["encoder"] = "LiveComposer"
+        c.sendMetadata(meta)
         var baseUs = -1L
         var lastVideoTs = -1L
         var lastAudioTs = -1L
