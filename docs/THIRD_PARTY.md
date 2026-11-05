@@ -7,6 +7,7 @@
 | Jetpack Compose（ui / foundation / material3 / material-icons-extended，BOM 2024.10.01） | 界面 | Apache-2.0 |
 | AndroidX Activity Compose 1.9.3（及其传递依赖 core / lifecycle / savedstate 等） | Activity 与 Compose 接入、权限、文件选择 | Apache-2.0 |
 | Kotlin 标准库、kotlinx-coroutines（Compose 传递依赖） | 语言运行时 | Apache-2.0 |
+| AndroidX WebKit 1.12.1 | 网页音频桥在页面脚本之前注入 | Apache-2.0 |
 | AndroidX Media3 1.4.1（exoplayer、exoplayer-hls、exoplayer-rtsp、datasource-rtmp） | 媒体图层：拉流与本地视频解码 | Apache-2.0 |
 | io.antmedia:rtmp-client 3.2.0（Media3 RTMP 扩展的依赖，内含 librtmp 原生库） | 拉取 RTMP 流 | 封装层 Apache-2.0；librtmp 为 LGPL-2.1（以独立 .so 动态库分发）。正式发布前请法务确认 |
 

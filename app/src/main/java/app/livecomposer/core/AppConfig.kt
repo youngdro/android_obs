@@ -23,7 +23,7 @@ enum class LayerType(val label: String) {
     CAMERA("摄像头"), WEB("网页"), MEDIA("媒体"), IMAGE("图片"), TEXT("文字");
 
     /** 有声音、可调音量的图层。 */
-    val hasAudio get() = this == CAMERA || this == MEDIA
+    val hasAudio get() = this == CAMERA || this == MEDIA || this == WEB
 }
 
 /** 图层。位置/尺寸为画布像素坐标（左上角原点）。网页图层的渲染视口（CSS 像素）与其在画布中的显示尺寸相互独立。 */

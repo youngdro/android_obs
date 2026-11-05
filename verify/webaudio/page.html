@@ -1,0 +1,7 @@
+<!doctype html><html><body>
+<audio id="a" src="tone.wav"></audio>
+<script>
+window.startWA = () => { const c = new AudioContext(); const o = c.createOscillator(); o.frequency.value = 1000;
+  const g = c.createGain(); g.gain.value = 0.5; o.connect(g).connect(c.destination); o.start(); return c.state; };
+window.startEl = () => document.getElementById('a').play().then(()=>'ok').catch(e=>'err '+e);
+</script></body></html>
