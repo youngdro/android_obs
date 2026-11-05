@@ -52,6 +52,8 @@ data class Layer(
     var loop: Boolean = true,
     // 声音：摄像头图层 = 麦克风音量；媒体图层 = 该源音量。0..2（1 = 原始音量）
     var volume: Float = 1f,
+    /** 各画布方向下的布局（x, y, w, h 归一化到画布尺寸），键为 CanvasOrientation.name。 */
+    val layouts: MutableMap<String, FloatArray> = mutableMapOf(),
 ) {
     fun toJson() = JSONObject().apply {
         put("id", id); put("type", type.name); put("name", name)
@@ -60,6 +62,9 @@ data class Layer(
         put("url", url); put("viewportW", viewportW); put("viewportH", viewportH)
         put("imageUri", imageUri); put("text", text); put("textSizePx", textSizePx.toDouble()); put("textColor", textColor)
         put("mediaUri", mediaUri); put("mediaLive", mediaLive); put("loop", loop); put("volume", volume.toDouble())
+        put("layouts", JSONObject().apply {
+            layouts.forEach { (k, v) -> put(k, JSONArray().apply { v.forEach { f -> put(f.toDouble()) } }) }
+        })
     }
 
     companion object {
@@ -74,6 +79,13 @@ data class Layer(
             textSizePx = o.optDouble("textSizePx", 64.0).toFloat(), textColor = o.optInt("textColor", -1),
             mediaUri = o.optString("mediaUri"), mediaLive = o.optBoolean("mediaLive", true),
             loop = o.optBoolean("loop", true), volume = o.optDouble("volume", 1.0).toFloat(),
+            layouts = mutableMapOf<String, FloatArray>().apply {
+                val lo = o.optJSONObject("layouts") ?: return@apply
+                for (k in lo.keys()) {
+                    val a = lo.optJSONArray(k) ?: continue
+                    if (a.length() == 4) put(k, FloatArray(4) { a.getDouble(it).toFloat() })
+                }
+            },
         )
     }
 }

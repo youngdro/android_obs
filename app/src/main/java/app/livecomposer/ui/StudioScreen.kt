@@ -235,7 +235,7 @@ private fun Hud(state: EngineState, ui: StudioUi, cb: StudioCallbacks, modifier:
 
 /**
  * 横屏右侧竖排工具栏。开播和麦克风固定在底部，始终可见；
- * 上半部分放主要入口，次要入口（交互模式、设置、性能信息）收进“更多”，高度不够时上半部分可滚动。
+ * 上半部分放设置、图层、添加，次要入口（网页交互模式、性能信息）收进“更多”，高度不够时上半部分可滚动。
  */
 @Composable
 private fun Rail(state: EngineState, ui: StudioUi, goLive: () -> Unit, cb: StudioCallbacks) {
@@ -248,6 +248,7 @@ private fun Rail(state: EngineState, ui: StudioUi, goLive: () -> Unit, cb: Studi
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            RoundIconButton(Icons.Rounded.Settings, "设置", { ui.togglePanel(Panel.SETTINGS) }, active = ui.panel == Panel.SETTINGS, size = 42.dp)
             RoundIconButton(Icons.Rounded.Layers, "图层", { ui.togglePanel(Panel.LAYERS) }, active = ui.panel == Panel.LAYERS, size = 42.dp)
             RoundIconButton(Icons.Rounded.Add, "添加", { ui.togglePanel(Panel.ADD) }, active = ui.panel == Panel.ADD, size = 42.dp)
             MoreButton(ui, size = 42.dp)
@@ -259,18 +260,17 @@ private fun Rail(state: EngineState, ui: StudioUi, goLive: () -> Unit, cb: Studi
     }
 }
 
-/** “更多”：交互模式、设置、性能信息开关。 */
+/** “更多”：网页交互模式、性能信息开关。 */
 @Composable
 private fun MoreButton(ui: StudioUi, size: androidx.compose.ui.unit.Dp = 44.dp) {
     var open by remember { mutableStateOf(false) }
     Box {
         RoundIconButton(Icons.Rounded.MoreHoriz, "更多", { open = true },
-            active = open || ui.interaction || ui.panel == Panel.SETTINGS, size = size)
+            active = open || ui.interaction, size = size)
         DropdownMenu(open, { open = false }, Modifier.background(Studio.SurfaceHigher)) {
             MenuRow(Icons.Rounded.TouchApp, if (ui.interaction) "退出网页交互" else "网页交互模式", ui.interaction) {
                 open = false; ui.interaction = !ui.interaction; ui.selectedId = null
             }
-            MenuRow(Icons.Rounded.Settings, "设置", ui.panel == Panel.SETTINGS) { open = false; ui.togglePanel(Panel.SETTINGS) }
             MenuRow(Icons.Rounded.Speed, if (ui.showPerf) "隐藏性能信息" else "显示性能信息", ui.showPerf) { open = false; ui.showPerf = !ui.showPerf }
         }
     }
@@ -296,6 +296,7 @@ private fun Dock(state: EngineState, ui: StudioUi, goLive: () -> Unit, cb: Studi
         RoundIconButton(Icons.Rounded.Add, "添加", { ui.togglePanel(Panel.ADD) }, active = ui.panel == Panel.ADD)
         GoLiveButton(state, goLive)
         MicButton(state, cb.onToggleMute)
+        RoundIconButton(Icons.Rounded.Settings, "设置", { ui.togglePanel(Panel.SETTINGS) }, active = ui.panel == Panel.SETTINGS)
         MoreButton(ui)
     }
 }

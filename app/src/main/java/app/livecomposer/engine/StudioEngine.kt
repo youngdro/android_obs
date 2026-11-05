@@ -33,6 +33,7 @@ import app.livecomposer.source.WebOverlaySource
 import app.livecomposer.stream.DeviceMetrics
 import app.livecomposer.stream.RunLogger
 import app.livecomposer.stream.StreamController
+import kotlin.math.abs
 
 /** 媒体图层播放状态。 */
 data class MediaStatus(val state: PlayerSource.State, val message: String?, val videoW: Int, val videoH: Int)
@@ -289,7 +290,14 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
     }
 
     /** 屏幕方向变化后（Activity 不重建）重新计算摄像头旋转。 */
-    fun onDisplayRotationChanged() { if (ready && started) openCamera() }
+    fun onDisplayRotationChanged() { if (ready && started) scheduleOpenCamera() }
+
+    /** 合并短时间内的多次重开（切换画布方向时：设置变更 + 屏幕旋转会各触发一次）。 */
+    private val openCameraRunnable = Runnable { if (ready && started) openCamera() }
+    private fun scheduleOpenCamera() {
+        main.removeCallbacks(openCameraRunnable)
+        main.postDelayed(openCameraRunnable, 250)
+    }
 
     // ------------------------------------------------------------------ 摄像头
 
@@ -665,29 +673,54 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         val oldW = config.canvasWidth; val oldH = config.canvasHeight
         val oldFps = config.fps; val oldGpu = config.webCaptureGpu; val oldHttp = config.allowCleartextWeb
         val oldRot = config.cameraRotationFix; val oldRes = config.resolution
+        val oldOrientation = config.orientation
         edit(config)
         val newW = config.canvasWidth; val newH = config.canvasHeight
-        if (oldW != newW || oldH != newH) {
-            for (l in config.layers) {
-                val full = l.x == 0f && l.y == 0f && l.w == oldW.toFloat() && l.h == oldH.toFloat()
-                if (full) {
-                    l.w = newW.toFloat(); l.h = newH.toFloat()
-                    if (l.type == LayerType.WEB) { l.viewportW = newW; l.viewportH = newH }
-                } else {
-                    // 保持中心点的相对位置与尺寸，限制在画布内
-                    val s = minOf(newW.toFloat() / oldW, newH.toFloat() / oldH)
-                    val cx = (l.x + l.w / 2) / oldW * newW; val cy = (l.y + l.h / 2) / oldH * newH
-                    l.w *= s; l.h *= s; l.x = cx - l.w / 2; l.y = cy - l.h / 2
-                }
-            }
-        }
+        if (oldW != newW || oldH != newH) relayout(oldOrientation, oldW, oldH)
         config.save(activity)
         if (!ready) { changed(); return }
         if (oldW != newW || oldH != newH || oldFps != config.fps) compositor.configure(newW, newH, config.fps)
         if (oldW != newW || oldH != newH || oldGpu != config.webCaptureGpu || oldHttp != config.allowCleartextWeb || oldFps != config.fps) setupWebLayer()
-        if (oldRes != config.resolution || oldRot != config.cameraRotationFix || oldW != newW) openCamera()
+        if (oldRes != config.resolution || oldRot != config.cameraRotationFix || oldW != newW) scheduleOpenCamera()
         pushScene()
         changed()
+    }
+
+    /**
+     * 画布尺寸变化后重新摆放图层。
+     * 横屏和竖屏各记一份布局（按画布比例归一化保存在图层里）：切回去时原样恢复，
+     * 不会因为每次换算都缩小一点而越切越小。第一次切到某个方向时：铺满画布的图层继续铺满，
+     * 其他图层保持中心的相对位置，等比缩放到能放进新画布。
+     */
+    private fun relayout(oldOrientation: CanvasOrientation, oldW: Int, oldH: Int) {
+        val newW = config.canvasWidth.toFloat(); val newH = config.canvasHeight.toFloat()
+        val newKey = config.orientation.name
+        for (l in config.layers) {
+            // 记下旧方向的布局
+            l.layouts[oldOrientation.name] = floatArrayOf(l.x / oldW, l.y / oldH, l.w / oldW, l.h / oldH)
+            val saved = l.layouts[newKey]
+            val full = abs(l.x) < 1f && abs(l.y) < 1f && abs(l.w - oldW) < 1f && abs(l.h - oldH) < 1f
+            when {
+                saved != null && oldOrientation != config.orientation -> {
+                    l.x = saved[0] * newW; l.y = saved[1] * newH; l.w = saved[2] * newW; l.h = saved[3] * newH
+                }
+                full -> { l.x = 0f; l.y = 0f; l.w = newW; l.h = newH }
+                oldOrientation == config.orientation -> {
+                    // 只换分辨率：整体等比缩放（可逆）
+                    val k = newW / oldW
+                    l.x *= k; l.y *= k; l.w *= k; l.h *= k
+                }
+                else -> {
+                    val s = minOf(1f, newW / l.w, newH / l.h)
+                    val cx = (l.x + l.w / 2) / oldW * newW; val cy = (l.y + l.h / 2) / oldH * newH
+                    l.w *= s; l.h *= s
+                    l.x = (cx - l.w / 2).coerceIn(0f, newW - l.w); l.y = (cy - l.h / 2).coerceIn(0f, newH - l.h)
+                }
+            }
+            if (l.type == LayerType.WEB && abs(l.w - newW) < 1f && abs(l.h - newH) < 1f) {
+                l.viewportW = newW.toInt(); l.viewportH = newH.toInt()
+            }
+        }
     }
 
     fun setSyncTest(on: Boolean) {
