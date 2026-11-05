@@ -32,6 +32,8 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -186,6 +188,13 @@ fun Field(
     var text by remember(value) { mutableStateOf(value) }
     var reveal by remember { mutableStateOf(false) }
     var focused by remember { mutableStateOf(false) }
+    // 面板关闭（输入框被移除）时，把还没提交的内容提交掉，避免“输入后直接关面板，内容就丢了”
+    val latestText by rememberUpdatedState(text)
+    val latestValue by rememberUpdatedState(value)
+    val latestCommit by rememberUpdatedState(onCommit)
+    DisposableEffect(Unit) {
+        onDispose { if (latestText != latestValue) latestCommit(latestText) }
+    }
     Column(modifier) {
         Text(label, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(bottom = 4.dp))
         Row(
