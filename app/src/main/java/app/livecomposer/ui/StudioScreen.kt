@@ -79,7 +79,7 @@ import app.livecomposer.core.Layer
 import app.livecomposer.engine.EngineState
 import app.livecomposer.engine.LiveState
 
-enum class Panel { NONE, LAYERS, INSPECTOR, ADD, SETTINGS, SCENES, CAMSTREAM }
+enum class Panel { NONE, LAYERS, INSPECTOR, ADD, SETTINGS, SCENES, CAMSTREAM, VISION }
 
 /** 界面对引擎的全部操作。 */
 class StudioCallbacks(
@@ -106,6 +106,7 @@ class StudioCallbacks(
     val onMedia: (String, String, Boolean) -> Unit,
     val scenes: SceneActions,
     val camStream: CamStreamActions,
+    val vision: VisionActions,
 )
 
 class StudioUi {
@@ -200,6 +201,7 @@ private fun Hud(state: EngineState, ui: StudioUi, cb: StudioCallbacks, modifier:
         Row(Modifier.horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             SceneChip(state, ui)
             CamStreamChip(state, ui.panel == Panel.CAMSTREAM) { ui.togglePanel(Panel.CAMSTREAM) }
+            VisionChip(state, ui.panel == Panel.VISION) { ui.togglePanel(Panel.VISION) }
             val d = state.durationSec
             val time = "%02d:%02d:%02d".format(d / 3600, d / 60 % 60, d % 60)
             when (state.live) {
@@ -428,6 +430,7 @@ private fun PanelHost(state: EngineState, ui: StudioUi, cb: StudioCallbacks, lan
                 onRename = cb.scenes.onRename, onDelete = { id -> ui.confirmDeleteScene = id }, onMove = cb.scenes.onMove,
             ), close, panelModifier)
             Panel.CAMSTREAM -> CamStreamPanel(state, cb.camStream, close, panelModifier)
+            Panel.VISION -> VisionPanel(state, cb.vision, close, panelModifier)
             Panel.NONE -> {}
         }
     }

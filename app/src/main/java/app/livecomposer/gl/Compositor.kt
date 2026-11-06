@@ -49,6 +49,13 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
     private val cameraMatrix = FloatArray(16)
     @Volatile private var cameraFrameAvailable = false
     @Volatile private var cameraHasFrame = false
+    /** 最近一次拿到新摄像头帧的时间（System.nanoTime），用于截图的帧龄。 */
+    @Volatile private var cameraFrameNs = 0L
+    // 截图用的离屏 FBO（按需创建，尺寸变化时重建）
+    private var snapFbo = 0
+    private var snapTex = 0
+    private var snapW = 0
+    private var snapH = 0
     private var cameraBufW = 1920
     private var cameraBufH = 1080
     private var cameraSensorOrientation = 90
@@ -219,6 +226,65 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
         latch.await()
     }
 
+    /**
+     * 截取摄像头当前最新一帧的完整画面（不含其他图层，方向与画布一致），长边不超过 maxLongEdge。
+     * 在合成线程上用离屏 FBO 画一次并读回，不影响推流和预览。回调在合成线程：bitmap 为 null 表示还没有摄像头帧。
+     */
+    fun snapshotCamera(maxLongEdge: Int, callback: (bitmap: Bitmap?, frameAgeMs: Long) -> Unit) {
+        handler.post {
+            if (!running || !cameraHasFrame || cameraFrameNs == 0L) { callback(null, -1); return@post }
+            val ageMs = (System.nanoTime() - cameraFrameNs) / 1_000_000
+            try {
+                val (nw, nh) = naturalCameraSize()
+                val rotW = if (cameraRotationDeg % 180 == 0) nw else nh
+                val rotH = if (cameraRotationDeg % 180 == 0) nh else nw
+                val scale = minOf(1f, maxLongEdge / maxOf(rotW, rotH))
+                val w = maxOf(2, (rotW * scale).toInt() and 1.inv())
+                val h = maxOf(2, (rotH * scale).toInt() and 1.inv())
+                egl.makeNothingCurrent()
+                ensureSnapFbo(w, h)
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, snapFbo)
+                GLES20.glViewport(0, 0, w, h)
+                GLES20.glDisable(GLES20.GL_BLEND)
+                GLES20.glClearColor(0f, 0f, 0f, 1f)
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                oes.draw(cameraTex, cameraMatrix, cameraCorners(0f, 0f, w.toFloat(), h.toFloat(), w.toFloat(), h.toFloat()), 1f)
+                val buf = java.nio.ByteBuffer.allocateDirect(w * h * 4).order(java.nio.ByteOrder.nativeOrder())
+                GLES20.glReadPixels(0, 0, w, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf)
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+                buf.rewind()
+                val raw = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                raw.copyPixelsFromBuffer(buf)
+                // GL 的原点在左下角，翻转成正常图片
+                val m = android.graphics.Matrix().apply { preScale(1f, -1f) }
+                val bmp = Bitmap.createBitmap(raw, 0, 0, w, h, m, false)
+                if (bmp !== raw) raw.recycle()
+                callback(bmp, ageMs)
+            } catch (e: Exception) {
+                Log.w(TAG, "snapshot", e)
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+                callback(null, -2)
+            }
+        }
+    }
+
+    private fun ensureSnapFbo(w: Int, h: Int) {
+        if (snapFbo != 0 && snapW == w && snapH == h) return
+        if (snapFbo != 0) {
+            GLES20.glDeleteFramebuffers(1, intArrayOf(snapFbo), 0)
+            GLES20.glDeleteTextures(1, intArrayOf(snapTex), 0)
+        }
+        snapTex = QuadRenderer.createTexture(false)
+        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+        val f = IntArray(1)
+        GLES20.glGenFramebuffers(1, f, 0)
+        snapFbo = f[0]
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, snapFbo)
+        GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, snapTex, 0)
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        snapW = w; snapH = h
+    }
+
     /** 第二路推流：把摄像头原始画面（不含其他图层）等比铺满画进这个编码器。null = 停止。 */
     fun setCameraEncoderSurface(surface: Surface?, width: Int, height: Int) {
         val latch = CountDownLatch(1)
@@ -340,6 +406,7 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
             cameraSt?.updateTexImage()
             cameraSt?.getTransformMatrix(cameraMatrix)
             cameraHasFrame = true
+            cameraFrameNs = System.nanoTime()
         }
         for (e in externals.values) {
             if (e.available) {
