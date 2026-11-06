@@ -12,6 +12,7 @@ import android.net.Network
 import android.net.Uri
 import android.content.Context
 import android.os.Build
+import android.util.Log
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
@@ -39,6 +40,8 @@ import app.livecomposer.source.WebOverlaySource
 import app.livecomposer.stream.DeviceMetrics
 import app.livecomposer.stream.RunLogger
 import app.livecomposer.stream.StreamController
+import app.livecomposer.vision.CameraFrameGrabber
+import app.livecomposer.vision.DeviceVisionClient
 import kotlin.math.abs
 
 /** 场景列表项（界面用）。 */
@@ -49,6 +52,16 @@ data class SceneInfo(
 )
 
 /** 媒体图层播放状态。 */
+/** 助播截图通道的状态与设置。 */
+data class VisionState(
+    val status: DeviceVisionClient.Status,
+    val baseUrl: String,
+    val liveId: String,
+    val apiKey: String,
+    val deviceId: String,
+    val enabled: Boolean,
+)
+
 /** 第二路（纯摄像头）推流的状态与设置。 */
 data class CamStreamState(
     val active: Boolean,
@@ -105,6 +118,7 @@ data class EngineState(
     val monitorLocal: Boolean,
     /** 第二路（纯摄像头）推流。 */
     val cam: CamStreamState,
+    val vision: VisionState,
     /** 网页采集帧率，0 = 跟随输出。 */
     val webCaptureFps: Int,
     val webGpu: Boolean,
@@ -167,6 +181,10 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
     private var metrics: DeviceMetrics.Sample? = null
     private var syncTest = false
     private var webAudio: String? = null
+    @Volatile private var cameraRunning = false
+    private lateinit var grabber: CameraFrameGrabber
+    private lateinit var vision: DeviceVisionClient
+    private var visionStatus = DeviceVisionClient.Status(DeviceVisionClient.State.IDLE)
     private lateinit var stream2: StreamController
     private var stream2Active = false
     private var stats2: StreamController.Stats? = null
@@ -211,6 +229,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
             zoomMin = if (ready) camera.zoomRange.lower else 1f, zoomMax = if (ready) camera.zoomRange.upper else 1f,
             syncTest = syncTest, noiseSuppression = config.noiseSuppression, webAudio = webAudio,
             powerSave = config.powerSave, autoDim = config.autoDim, monitorLocal = config.monitorLocal,
+            vision = VisionState(visionStatus, config.visionBaseUrl, config.visionLiveId, config.visionApiKey, config.deviceId, config.visionEnabled),
             cam = CamStreamState(stream2Active, stats2, stats2?.message ?: stream2EndMessage, config.camUrl, config.camAudio,
                 config.camResolution, config.camBitrateKbps), webCaptureFps = config.webCaptureFps, webGpu = config.webCaptureGpu, allowCleartext = config.allowCleartextWeb,
             cameraRotationFix = config.cameraRotationFix,
@@ -260,6 +279,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         compositor = Compositor(config.canvasWidth, config.canvasHeight, config.fps)
         camera = CameraSource(activity, object : CameraSource.Listener {
             override fun onCameraState(state: CameraSource.State, message: String?) {
+                cameraRunning = state == CameraSource.State.RUNNING
                 main.post { cameraMessage = message; changed() }
             }
         })
@@ -293,6 +313,10 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
                 changed()
             }
         }, StreamController.Kind.CAMERA)
+        grabber = CameraFrameGrabber({ if (ready) compositor else null }, { started && cameraRunning })
+        vision = DeviceVisionClient(grabber, object : DeviceVisionClient.Listener {
+            override fun onStatus(status: DeviceVisionClient.Status) { main.post { visionStatus = status; changed() } }
+        }, log = { Log.i("DeviceVision", it) })
         compositor.start { st -> main.post { cameraTexture = st; if (started) openCamera() } }
         if (previewSurface != null) compositor.setPreviewSurface(previewSurface, pw, ph)
         setupWebLayer()
@@ -307,6 +331,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         started = true
         if (!ready) return
         openCamera()
+        if (config.visionEnabled) connectVision()
         micMessage = null
         audio.startCapture()
         players.values.forEach { it.resume() }
@@ -321,6 +346,8 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         if (stream.isActive) { stream.stop("应用进入后台，推流已自动停止"); stopped = true }
         if (stream2.isActive) { stream2.stop("应用进入后台，第二路已自动停止"); stopped = true }
         camera.close()
+        cameraRunning = false
+        vision.stop() // 后台时摄像头已关闭，截图无法完成；回到前台自动重连
         audio.stopCapture()
         players.values.forEach { it.pause() }
         config.save(activity)
@@ -335,6 +362,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         }
         stream.stop()
         stream2.stop()
+        vision.shutdown(); grabber.shutdown()
         web?.release()
         players.values.forEach { it.release() }; players.clear()
         camera.release()
@@ -771,6 +799,33 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
     }
 
     fun stopCamStream() { if (ready) stream2.stop() }
+
+    // ------------------------------------------------------------------ 助播截图通道
+
+    fun updateVision(edit: (AppConfig) -> Unit) {
+        edit(config)
+        config.save(activity)
+        changed()
+    }
+
+    /** 连接助播截图服务（记住“已开启”，下次打开 App 自动连接）。返回参数错误或 null。 */
+    fun connectVision(): String? {
+        val cfg = DeviceVisionClient.Config(config.visionBaseUrl.trim(), config.visionLiveId.trim(), config.visionApiKey.trim(), config.deviceId)
+        DeviceVisionClient.validate(cfg)?.let { return it }
+        if (!ready) return "正在初始化"
+        config.visionEnabled = true
+        config.save(activity)
+        vision.start(cfg)
+        changed()
+        return null
+    }
+
+    fun disconnectVision() {
+        config.visionEnabled = false
+        config.save(activity)
+        if (ready) vision.stop()
+        changed()
+    }
 
     fun updateCamStream(edit: (AppConfig) -> Unit) {
         edit(config)

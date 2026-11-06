@@ -12,8 +12,8 @@ android {
         applicationId = "app.livecomposer"
         minSdk = 29          // Android 10 及以上
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.7.1"
+        versionCode = 11
+        versionName = "0.8.0"
     }
 
     buildTypes {
@@ -55,4 +55,6 @@ dependencies {
     implementation("androidx.media3:media3-datasource-rtmp:$media3")
     // 网页音频桥：在页面脚本之前注入（DOCUMENT_START_SCRIPT）
     implementation("androidx.webkit:webkit:1.12.1")
+    // 助播截图通道：HTTPS 发现接口 + WebSocket
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
