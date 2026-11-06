@@ -55,7 +55,7 @@ private fun visionColor(s: State) = when (s) {
 }
 
 /**
- * 截图通道面板：连接助播服务端的设备视觉 WebSocket，服务端要求截图时把摄像头当下的画面发过去。
+ * 截图通道面板：约每 2 秒轮询助播服务端的设备事件信箱（HTTP），服务端要求截图时把摄像头当下的画面发过去。
  */
 @Composable
 fun VisionPanel(state: EngineState, act: VisionActions, onClose: () -> Unit, modifier: Modifier = Modifier) {
@@ -123,7 +123,7 @@ fun VisionPanel(state: EngineState, act: VisionActions, onClose: () -> Unit, mod
                     Text(if (copied) "已复制" else "复制", color = Studio.Accent, fontSize = 13.sp)
                 }
             }
-            Text("首次安装时生成，之后固定不变（卸载重装会重新生成）。服务端用它识别这台手机。",
+            Text("首次安装时生成，之后固定不变（卸载重装会重新生成）。每次请求都会带上，同一直播间有多台设备时服务端靠它区分。",
                 style = MaterialTheme.typography.bodySmall)
         }
 
@@ -145,7 +145,7 @@ fun VisionPanel(state: EngineState, act: VisionActions, onClose: () -> Unit, mod
             Text(if (locked) "断开" else if (canConnect) "连接" else "先填写 liveId 和密钥",
                 color = if (on) Studio.Bg else Studio.TextFaint, fontWeight = FontWeight.Bold, fontSize = 15.sp)
         }
-        Text("连接后会一直保持，断线自动重连；下次打开 App 也会自动连接，直到点“断开”。截图需要摄像头开着。",
+        Text("连接后约每 2 秒向服务端查询一次有没有截图任务，网络异常会自动重试；下次打开 App 也会自动连接，直到点“断开”。截图需要摄像头开着，App 在后台时暂停。",
             style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
     }
 }

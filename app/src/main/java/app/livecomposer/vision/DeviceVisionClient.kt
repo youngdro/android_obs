@@ -2,29 +2,35 @@ package app.livecomposer.vision
 
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.util.Base64
-import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import kotlin.random.Random
 
 /**
- * 助播设备截图通道（协议 v1）：
- * 发现接口 → WSS → 5 秒内 auth → 心跳 → 收到 vision.capture.requested 时快速 ACK、抓当前摄像头帧、回传一张 JPEG。
+ * 助播设备截图通道：设备 HTTP 事件信箱 v1（轮询）。
  *
- * - 这是独立的可选能力：连接失败、断线、截图失败都不影响推流。
- * - 断线按 1、2、4、8、15 秒（加随机抖动）退避，每次重连都重新请求发现接口拿新令牌，不复用旧 token、不补发旧结果。
- * - 接入密钥错误、已有其他设备在线等业务错误不自动抢连，停下来等用户处理。
- * - 日志只记请求 ID、耗时、字节数和错误码，不输出接入密钥、连接令牌和图片内容。
+ * 约每 2 秒 GET 一次信箱领取事件；收到 vision.capture.requested 时抓当前摄像头帧，
+ * 在本次领取租约内 POST 最终回执（completed 带 JPEG，或 failed 带错误码）。
+ *
+ * - 独立的可选能力：轮询失败、截图失败都不影响推流。
+ * - 同一时间只有一个 GET；截图上传独立进行，不暂停轮询。
+ * - 同一 eventId 不并行执行；执行中收到新的领取凭据（receipt），回执用新凭据。
+ * - 超过租约的结果不上传（等服务端重新投递后取新帧），不回放旧图。
+ * - 回执网络失败时用同一请求体重试，但不越过租约。
+ * - 接入密钥错误、参数错误停止轮询等用户处理；会话未关联低频重试；503 / 网络错误按 2、4、8、16、30 秒加抖动退避。
+ * - 日志只记事件 ID、耗时、字节数和错误码，不输出接入密钥、领取凭据和图片内容。
  *
  * 所有状态只在内部单线程执行器上修改；对外回调也在该线程，调用方自行切到主线程。
  */
@@ -33,16 +39,18 @@ class DeviceVisionClient(
     private val listener: Listener,
     private val log: (String) -> Unit = {},
     private val http: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS)
-        .pingInterval(15, TimeUnit.SECONDS) // 标准 WebSocket Ping；JSON ping 另行应答
+        .connectTimeout(8, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS).writeTimeout(10, TimeUnit.SECONDS)
         .build(),
     private val now: () -> Long = System::currentTimeMillis,
+    /** 轮询最短间隔（协议要求不小于 1 秒；测试可调小）。 */
+    private val minPollMs: Long = 1000,
+    /** 退避时长倍率（测试可调小）。 */
+    private val backoffScale: Double = 1.0,
 ) {
     data class Config(val baseUrl: String, val liveId: String, val apiKey: String, val deviceId: String)
 
     enum class State(val label: String) {
-        IDLE("未连接"), DISCOVERING("获取连接信息"), CONNECTING("连接中"), AUTHENTICATING("鉴权中"),
-        ONLINE("已连接"), RETRYING("重连中"), STOPPED("已停止"),
+        IDLE("未连接"), CONNECTING("连接中"), ONLINE("已连接"), RETRYING("重试中"), STOPPED("已停止"),
     }
 
     data class Status(
@@ -56,20 +64,20 @@ class DeviceVisionClient(
 
     interface Listener { fun onStatus(status: Status) }
 
+    private class Task(val eventId: String, var receipt: String, var localDeadline: Long)
+
     private val exec = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "device-vision").apply { isDaemon = true } }
     private var config: Config? = null
-    private var ws: WebSocket? = null
-    /** 每次连接尝试的代号：旧连接 / 旧请求的回调一律忽略。 */
+    /** 每次 start/stop 递增：旧轮询、旧回执的回调一律忽略。 */
     private var gen = 0
     private var attempt = 0
-    private var retryTask: ScheduledFuture<*>? = null
-    private var authTimeout: ScheduledFuture<*>? = null
-    private var sessionId: String? = null
-    private var deviceId: String = ""
-    private var capture = Capture()
+    private var pollTask: ScheduledFuture<*>? = null
+    private var polling = false
+    /** 正在执行的事件（按 eventId 去重）。 */
+    private val running = HashMap<String, Task>()
+    /** 已成功回执的事件，避免响应丢失后重复处理（保留最近 64 个）。 */
+    private val done = LinkedHashSet<String>()
     private var status = Status(State.IDLE)
-
-    private data class Capture(val maxLongEdge: Int = 768, val maxBytes: Int = 262_144, val timeoutMs: Long = 4000)
 
     // ------------------------------------------------------------------ 对外
 
@@ -78,257 +86,251 @@ class DeviceVisionClient(
         val err = validate(cfg)
         if (err != null) { publish(Status(State.STOPPED, err)); return@execute }
         config = cfg
-        deviceId = cfg.deviceId
         attempt = 0
-        status = Status(State.IDLE)
-        discover()
+        status = Status(State.CONNECTING)
+        publish(status)
+        poll()
     }
 
     fun stop() = exec.execute { stopInternal(); config = null; publish(status.copy(state = State.IDLE, message = null, sessionId = null)) }
 
     fun shutdown() { exec.execute { stopInternal() }; exec.shutdown() }
 
-    // ------------------------------------------------------------------ 发现
+    // ------------------------------------------------------------------ 轮询
 
-    private fun discover() {
+    private fun base(cfg: Config): HttpUrl.Builder? =
+        cfg.baseUrl.trimEnd('/').toHttpUrlOrNull()?.newBuilder()?.addPathSegments("api/tb-live-live2d/device-events")
+
+    private fun poll() {
         val cfg = config ?: return
-        val g = ++gen
-        publish(status.copy(state = State.DISCOVERING, message = null))
-        val url = cfg.baseUrl.trimEnd('/').toHttpUrlOrNull()?.newBuilder()
-            ?.addPathSegments("api/tb-live-live2d/device-vision/connection")
-            ?.addQueryParameter("liveId", cfg.liveId)
-            ?.addQueryParameter("deviceId", cfg.deviceId)
-            ?.build()
-        if (url == null) { publish(Status(State.STOPPED, "服务域名格式不对")); return }
+        if (polling) return
+        val url = base(cfg)?.addQueryParameter("liveId", cfg.liveId)?.addQueryParameter("deviceId", cfg.deviceId)?.build()
+        if (url == null) { stopWith("服务域名格式不对"); return }
+        val g = gen
+        polling = true
         val req = Request.Builder().url(url).header("Authorization", "Bearer ${cfg.apiKey}").header("Cache-Control", "no-store").get().build()
         http.newCall(req).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) = exec.execute {
-                if (g == gen) retry("无法访问服务：${e.message ?: e.javaClass.simpleName}")
+                if (g != gen) return@execute
+                polling = false
+                backoff("无法访问服务：${e.javaClass.simpleName}")
             }
 
             override fun onResponse(call: Call, response: Response) {
                 val code = response.code
                 val retryAfter = response.header("Retry-After")?.toLongOrNull()
                 val body = try { response.body?.string() ?: "" } catch (_: Exception) { "" } finally { response.close() }
-                exec.execute { if (g == gen) onDiscovered(code, body, retryAfter) }
+                exec.execute {
+                    if (g != gen) return@execute
+                    polling = false
+                    onPolled(code, body, retryAfter)
+                }
             }
         })
     }
 
-    private fun onDiscovered(httpCode: Int, body: String, retryAfterSec: Long?) {
+    private fun onPolled(httpCode: Int, body: String, retryAfterSec: Long?) {
         val o = try { JSONObject(body) } catch (_: Exception) { null }
         val code = o?.optString("code").orEmpty()
-        if (httpCode != 200 || o == null || !o.optBoolean("ok")) {
-            log("discover http=$httpCode code=$code")
-            when (httpCode) {
-                401 -> publish(Status(State.STOPPED, "设备接入密钥不正确（401）"))
-                400 -> publish(Status(State.STOPPED, "liveId 或设备 ID 格式不对（400）"))
-                404 -> retry("没有找到这个直播间的关联会话，请先在助播后台关联直播间", minDelayMs = 15_000)
-                429 -> retry("请求过于频繁", minDelayMs = (retryAfterSec ?: 2) * 1000)
-                503 -> retry("服务暂不可用（${code.ifEmpty { "503" }}）")
-                else -> retry("连接信息获取失败（HTTP $httpCode${if (code.isNotEmpty()) " $code" else ""}）")
-            }
+        if (httpCode == 200 && o?.optBoolean("ok") == true) {
+            attempt = 0
+            val serverTime = o.optLong("serverTime", 0L)
+            val offset = if (serverTime > 0) now() - serverTime else 0L // 本机时间 - 服务端时间
+            if (status.state != State.ONLINE) log("poll ok session=${o.optString("sessionId")}")
+            publish(status.copy(state = State.ONLINE, message = null, sessionId = o.optString("sessionId").ifEmpty { null }))
+            o.optJSONArray("events")?.let { handleEvents(it, offset) }
+            schedulePoll(maxOf(minPollMs, o.optLong("pollAfterMs", 2000L)))
             return
         }
-        val wsUrl = o.optString("websocketUrl")
-        val token = o.optString("connectionToken")
-        if (wsUrl.isEmpty() || token.isEmpty()) { retry("连接信息不完整"); return }
-        o.optJSONObject("capture")?.let {
-            capture = Capture(
-                maxLongEdge = it.optInt("maxLongEdge", 768).coerceIn(64, 1024),
-                maxBytes = it.optInt("maxBytes", 262_144).coerceIn(16_384, 262_144),
-                timeoutMs = it.optLong("timeoutMs", 4000),
-            )
+        log("poll http=$httpCode code=$code")
+        when {
+            httpCode == 401 -> stopWith("设备接入密钥不正确（401），请检查后重新连接")
+            httpCode == 400 || httpCode == 415 -> stopWith("请求参数不被接受（${code.ifEmpty { "$httpCode" }}），请检查 liveId")
+            httpCode == 404 -> {
+                publish(status.copy(state = State.RETRYING, message = "没有找到这个直播间的关联会话，请先在助播控制台关联直播间，8 秒后重试"))
+                schedulePoll(scaled(8000))
+            }
+            httpCode == 429 -> {
+                val d = maxOf(scaled(5000), (retryAfterSec ?: 0) * 1000)
+                publish(status.copy(state = State.RETRYING, message = "请求过快（${code.ifEmpty { "429" }}），${(d + 999) / 1000} 秒后继续"))
+                schedulePoll(d)
+            }
+            httpCode == 503 -> backoff("服务暂不可用（${code.ifEmpty { "503" }}）")
+            else -> backoff("服务返回异常（HTTP $httpCode${if (code.isNotEmpty()) " $code" else ""}）")
         }
-        sessionId = o.optString("sessionId").ifEmpty { null }
-        connect(wsUrl, token, o.optLong("authTimeoutMs", 5000))
     }
 
-    // ------------------------------------------------------------------ 连接与鉴权
+    private fun backoff(reason: String) {
+        if (config == null) return
+        val base = scaled(BACKOFF_MS[minOf(attempt, BACKOFF_MS.size - 1)])
+        attempt++
+        val delay = base + Random.nextLong(0, base / 4 + 1)
+        publish(status.copy(state = State.RETRYING, message = "$reason，${(delay + 999) / 1000} 秒后重试"))
+        schedulePoll(delay)
+    }
 
-    private fun connect(wsUrl: String, token: String, authTimeoutMs: Long) {
+    private fun schedulePoll(delayMs: Long) {
+        if (config == null) return
+        pollTask?.cancel(false)
         val g = gen
-        publish(status.copy(state = State.CONNECTING, message = null))
-        val req = try { Request.Builder().url(wsUrl).build() } catch (e: Exception) { retry("WebSocket 地址无效"); return }
-        ws = http.newWebSocket(req, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) = exec.execute {
-                if (g != gen) { webSocket.close(1000, null); return@execute }
-                publish(status.copy(state = State.AUTHENTICATING))
-                // 令牌只放在首条消息里，不放 URL
-                webSocket.send(JSONObject().put("type", "auth").put("protocolVersion", 1).put("token", token).toString())
-                authTimeout = exec.schedule({ if (g == gen && status.state == State.AUTHENTICATING) { webSocket.cancel(); retry("鉴权超时") } },
-                    authTimeoutMs.coerceIn(1000, 10_000), TimeUnit.MILLISECONDS)
+        pollTask = exec.schedule({ if (g == gen) poll() }, delayMs, TimeUnit.MILLISECONDS)
+    }
+
+    private fun scaled(ms: Long) = maxOf(1L, (ms * backoffScale).toLong())
+
+    // ------------------------------------------------------------------ 事件
+
+    private fun handleEvents(arr: JSONArray, offset: Long) {
+        for (i in 0 until arr.length()) {
+            val ev = arr.optJSONObject(i) ?: continue
+            val id = ev.optString("eventId"); val receipt = ev.optString("receipt")
+            if (id.isEmpty() || receipt.isEmpty()) continue
+            // 本机截止 = 租约到期（换算到本机时间）留 300ms 余量
+            val lease = ev.optLong("leaseExpiresAt", 0L).takeIf { it > 0 } ?: ev.optLong("expiresAt", 0L)
+            val localDeadline = if (lease > 0) lease + offset - 300 else now() + 7000
+            val cur = running[id]
+            if (cur != null) {
+                // 执行中又领到：后续回执使用新凭据，不并行执行
+                cur.receipt = receipt; cur.localDeadline = localDeadline
+                continue
+            }
+            if (id in done) continue
+            val payload = ev.optJSONObject("payload")
+            when (payload?.optString("event")) {
+                "vision.capture.requested" -> capture(Task(id, receipt, localDeadline), payload)
+                "system.event.result" -> {
+                    val t = Task(id, receipt, localDeadline); running[id] = t
+                    sendAck(t, "completed", JSONObject().put("event", "system.event.acknowledged").put("eventVersion", 1).put("data", JSONObject()), null)
+                }
+                else -> log("event $id ignored: ${payload?.optString("event")}") // 未约定的事件不乱回执
+            }
+        }
+    }
+
+    private fun capture(t: Task, payload: JSONObject) {
+        running[t.eventId] = t
+        val d = payload.optJSONObject("data") ?: JSONObject()
+        if (payload.optInt("eventVersion", -1) != 1) { fail(t, "UNSUPPORTED_EVENT", "事件版本不支持"); return }
+        val fmt = d.optString("format", "image/jpeg")
+        if (fmt.isNotEmpty() && fmt != "image/jpeg") { fail(t, "UNSUPPORTED_EVENT", "不支持的图片格式"); return }
+        val maxEdge = d.optInt("maxLongEdge", 768).coerceIn(64, 1024)
+        val maxBytes = d.optInt("maxBytes", MAX_JPEG).coerceIn(16 * 1024, MAX_JPEG)
+        val quality = d.optDouble("quality", 0.7).toFloat().coerceIn(0.3f, 0.95f)
+        val started = now()
+        val g = gen
+        grabber.grab(maxEdge, quality, maxBytes) { r ->
+            exec.execute {
+                if (g != gen || running[t.eventId] !== t) return@execute
+                when (r) {
+                    is FrameGrabber.Result.Ok -> {
+                        if (now() > t.localDeadline) {
+                            // 超过租约：不上传旧帧，等服务端重新投递后取新帧
+                            log("capture ${t.eventId} late ${now() - started}ms, dropped")
+                            running.remove(t.eventId)
+                            return@execute
+                        }
+                        val data = JSONObject().put("success", true)
+                            .put("imageUrl", "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(r.jpeg))
+                            .put("capturedAt", r.capturedAtMs)
+                            .put("frameAgeMs", r.frameAgeMs.coerceIn(0, 2000))
+                        log("capture ${t.eventId} ok ${r.jpeg.size}B ${now() - started}ms")
+                        sendAck(t, "completed", resultPayload(data), r.jpeg.size)
+                    }
+                    is FrameGrabber.Result.Fail -> fail(t, r.code, r.message)
+                }
+            }
+        }
+    }
+
+    private fun resultPayload(data: JSONObject) =
+        JSONObject().put("event", "vision.capture.completed").put("eventVersion", 1).put("data", data)
+
+    private fun fail(t: Task, code: String, message: String) {
+        val c = if (code in ERROR_CODES) code else "NO_FRAME"
+        log("capture ${t.eventId} failed $c")
+        publish(status.copy(failures = status.failures + 1, lastCapture = "${timeOf(now())} 失败：$message"))
+        sendAck(t, "failed", resultPayload(JSONObject().put("success", false).put("errorCode", c)), null)
+    }
+
+    /** 提交最终回执；网络错误 / 5xx 时在租约内用同一 eventId 和请求体重试。 */
+    private fun sendAck(t: Task, state: String, payload: JSONObject, imageBytes: Int?) {
+        val cfg = config ?: return
+        val url = base(cfg)?.addPathSegment("ack")?.build() ?: return
+        val receipt = t.receipt
+        val body = JSONObject().put("liveId", cfg.liveId).put("deviceId", cfg.deviceId).put("eventId", t.eventId)
+            .put("receipt", receipt).put("status", state).put("payload", payload).toString()
+        val req = Request.Builder().url(url).header("Authorization", "Bearer ${cfg.apiKey}")
+            .post(body.toRequestBody(JSON)).build()
+        val g = gen
+        val sent = now()
+        http.newCall(req).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) = exec.execute {
+                if (g == gen) onAck(t, state, payload, imageBytes, receipt, -1, "", sent)
             }
 
-            override fun onMessage(webSocket: WebSocket, text: String) = exec.execute { if (g == gen) onText(webSocket, text) }
-
-            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                webSocket.close(1000, null)
-            }
-
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = exec.execute {
-                if (g == gen) onDisconnected(code, reason)
-            }
-
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = exec.execute {
-                if (g == gen) retry("连接断开：${t.message ?: t.javaClass.simpleName}")
+            override fun onResponse(call: Call, response: Response) {
+                val code = response.code
+                val text = try { response.body?.string() ?: "" } catch (_: Exception) { "" } finally { response.close() }
+                exec.execute { if (g == gen) onAck(t, state, payload, imageBytes, receipt, code, text, sent) }
             }
         })
     }
 
-    private fun onDisconnected(code: Int, reason: String) {
-        log("closed code=$code")
-        when (code) {
-            4003 -> retry("直播会话已结束", minDelayMs = 15_000)
-            4009 -> retry("会话已换绑或连接失效")
-            4001 -> retry("鉴权失败")
-            4008 -> retry("服务端限流", minDelayMs = 5_000)
-            else -> retry("连接已关闭（$code）")
-        }
-    }
-
-    private fun onText(webSocket: WebSocket, text: String) {
-        val o = try { JSONObject(text) } catch (_: Exception) { return }
-        when (o.optString("type")) {
-            "auth" -> onAuth(o)
-            "ping" -> webSocket.send(JSONObject().put("type", "pong").put("sentAt", now()).toString())
-            "pong" -> {}
-            "action" -> onAction(webSocket, o)
-        }
-    }
-
-    private fun onAuth(o: JSONObject) {
-        authTimeout?.cancel(false)
-        if (o.optBoolean("ok")) {
-            sessionId = o.optString("sessionId").ifEmpty { sessionId }
-            attempt = 0
-            log("auth ok session=$sessionId")
-            publish(status.copy(state = State.ONLINE, message = null, sessionId = sessionId))
-            return
-        }
-        val code = o.optString("code")
-        log("auth failed code=$code")
-        when (code) {
-            "ALREADY_CONNECTED" -> stopWith("这个直播会话已有其他截图设备在线，先断开那台设备再连接")
-            "SESSION_UNAVAILABLE" -> { status = status.copy(message = "会话不存在或已结束"); retry("会话不存在或已结束", minDelayMs = 15_000) }
-            else -> retry("鉴权失败（${code.ifEmpty { "未知" }}）") // AUTH_INVALID / TOKEN_USED / SESSION_REBOUND：重新发现
-        }
-    }
-
-    // ------------------------------------------------------------------ 截图
-
-    private fun onAction(webSocket: WebSocket, o: JSONObject) {
-        val p = o.optJSONObject("payload") ?: return
-        val event = p.optString("event")
-        val data = p.optJSONObject("data") ?: JSONObject()
-        when (event) {
-            "vision.capture.requested" -> onCaptureRequested(webSocket, o, p, data)
-            "system.action.ack" -> {
-                // 服务端对结果的回执：只用于诊断，不再 ACK（避免 ACK 循环）
-                val c = data.optString("code")
-                log("server ack replyTo=${data.optString("replyTo")} code=$c")
-                if (c.isNotEmpty() && c != "CAPTURE_RECEIVED" && c != "CAPTURE_FAILED") {
-                    publish(status.copy(lastCapture = "服务端回执：$c"))
-                }
+    private fun onAck(t: Task, state: String, payload: JSONObject, imageBytes: Int?, receipt: String, httpCode: Int, text: String, sent: Long) {
+        val o = try { JSONObject(text) } catch (_: Exception) { null }
+        val code = o?.optString("code").orEmpty()
+        val isCapture = payload.optString("event") == "vision.capture.completed"
+        if (httpCode == 200 && o?.optBoolean("ok") == true) {
+            log("ack ${t.eventId} $state http=200 dup=${o.optBoolean("duplicate")} ${now() - sent}ms")
+            running.remove(t.eventId)
+            done.add(t.eventId); if (done.size > 64) done.remove(done.first())
+            if (isCapture && state == "completed") {
+                publish(status.copy(captures = status.captures + 1, lastCapture = "${timeOf(now())} 已发送 ${(imageBytes ?: 0) / 1024}KB"))
             }
-        }
-    }
-
-    private fun onCaptureRequested(webSocket: WebSocket, o: JSONObject, p: JSONObject, data: JSONObject) {
-        val requestId = o.optString("messageId")
-        val roomId = p.optString("roomId")
-        if (requestId.isEmpty()) return
-        if (o.optInt("protocolVersion") != 1 || p.optInt("eventVersion") != 1 || (sessionId != null && roomId != sessionId)) {
-            sendAction(webSocket, roomId, "system.action.ack", JSONObject().put("replyTo", requestId).put("status", "rejected")
-                .put("code", "INVALID_REQUEST").put("message", "协议版本或会话不匹配"))
             return
         }
-        val receivedAt = now()
-        val timeoutMs = data.optLong("timeoutMs", capture.timeoutMs).coerceIn(500, 10_000)
-        val localDeadline = receivedAt + timeoutMs
-        val maxLongEdge = data.optInt("maxLongEdge", capture.maxLongEdge).coerceIn(64, 1024)
-        val maxBytes = data.optInt("maxBytes", capture.maxBytes).coerceIn(16_384, 262_144)
-        val quality = data.optDouble("quality", 0.7).toFloat().coerceIn(0.3f, 0.95f)
-        val format = data.optString("format", "image/jpeg")
-        if (format != "image/jpeg") {
-            sendAction(webSocket, roomId, "system.action.ack", JSONObject().put("replyTo", requestId).put("status", "rejected")
-                .put("code", "UNSUPPORTED_FORMAT").put("message", "只支持 JPEG"))
+        log("ack ${t.eventId} http=$httpCode code=$code")
+        val retriable = httpCode == -1 || httpCode >= 500 || httpCode == 429
+        if (retriable && now() + 500 < t.localDeadline) {
+            // 回执重试保持相同 eventId、receipt 和内容；若期间换了新凭据，就用新凭据
+            exec.schedule({
+                if (running[t.eventId] === t && config != null) sendAck(t, state, payload, imageBytes)
+            }, 500, TimeUnit.MILLISECONDS)
             return
         }
-        // 先快速 ACK，再异步抓帧
-        sendAction(webSocket, roomId, "system.action.ack", JSONObject().put("replyTo", requestId).put("status", "accepted"))
-        val g = gen
-        grabber.grab(maxLongEdge, quality, maxBytes) { r ->
-            exec.execute {
-                if (g != gen || ws !== webSocket) return@execute // 断线后不补发旧结果
-                val took = now() - receivedAt
-                if (now() > localDeadline) {
-                    log("capture $requestId late ${took}ms, dropped")
-                    publish(status.copy(failures = status.failures + 1, lastCapture = "截图超时（${took}ms），已放弃"))
-                    return@execute
-                }
-                when (r) {
-                    is FrameGrabber.Result.Ok -> {
-                        val b64 = Base64.getEncoder().encodeToString(r.jpeg)
-                        sendAction(webSocket, roomId, "vision.capture.completed", JSONObject()
-                            .put("replyTo", requestId).put("success", true)
-                            .put("imageUrl", "data:image/jpeg;base64,$b64")
-                            .put("capturedAt", r.capturedAtMs).put("frameAgeMs", r.frameAgeMs.coerceIn(0, 2000)))
-                        log("capture $requestId ok ${r.jpeg.size}B ${took}ms")
-                        publish(status.copy(captures = status.captures + 1, lastCapture = "${timeOf(now())} 已回传 ${r.jpeg.size / 1024}KB，用时 ${took}ms"))
-                    }
-                    is FrameGrabber.Result.Fail -> {
-                        sendAction(webSocket, roomId, "vision.capture.completed", JSONObject()
-                            .put("replyTo", requestId).put("success", false).put("code", r.code).put("message", r.message))
-                        log("capture $requestId failed ${r.code}")
-                        publish(status.copy(failures = status.failures + 1, lastCapture = "${timeOf(now())} 截图失败：${r.message}"))
-                    }
-                }
+        running.remove(t.eventId)
+        if (receipt != t.receipt && httpCode == 409) return // 旧凭据失效但已有新凭据：由新一轮处理
+        if (isCapture) {
+            val why = when {
+                httpCode == 409 -> "领取已过期，等待重新投递"
+                httpCode == 410 || httpCode == 404 -> "任务已过期或不存在"
+                httpCode == 413 -> "图片过大"
+                httpCode == 422 -> "图片不合规（$code）"
+                httpCode == 401 -> "接入密钥不正确"
+                httpCode == -1 -> "网络错误"
+                else -> "HTTP $httpCode $code"
             }
+            if (state == "completed") publish(status.copy(failures = status.failures + 1, lastCapture = "${timeOf(now())} 发送失败：$why"))
         }
+        if (httpCode == 401) stopWith("设备接入密钥不正确（401），请检查后重新连接")
     }
 
-    private fun sendAction(webSocket: WebSocket, roomId: String, event: String, data: JSONObject) {
-        val msg = JSONObject()
-            .put("type", "action").put("protocolVersion", 1)
-            .put("messageId", UUID.randomUUID().toString())
-            .put("sentAt", now())
-            .put("target", deviceId)
-            .put("payload", JSONObject().put("event", event).put("eventVersion", 1).put("roomId", roomId)
-                .put("ackRequired", false).put("data", data))
-        webSocket.send(msg.toString())
-    }
-
-    // ------------------------------------------------------------------ 重连与停止
-
-    private fun retry(reason: String, minDelayMs: Long = 0) {
-        if (config == null) return
-        closeSocket()
-        val base = BACKOFF_MS[minOf(attempt, BACKOFF_MS.size - 1)]
-        attempt++
-        val delay = maxOf(base + Random.nextLong(0, base / 4 + 1), minDelayMs)
-        publish(status.copy(state = State.RETRYING, message = "$reason，${(delay + 999) / 1000} 秒后重试"))
-        retryTask?.cancel(false)
-        retryTask = exec.schedule({ if (config != null) discover() }, delay, TimeUnit.MILLISECONDS)
-    }
+    // ------------------------------------------------------------------ 停止
 
     private fun stopWith(message: String) {
-        closeSocket()
-        retryTask?.cancel(false)
+        gen++
+        pollTask?.cancel(false); pollTask = null
+        polling = false
+        running.clear()
+        config = null
         publish(status.copy(state = State.STOPPED, message = message))
     }
 
     private fun stopInternal() {
         gen++
-        retryTask?.cancel(false); retryTask = null
-        closeSocket()
-    }
-
-    private fun closeSocket() {
-        authTimeout?.cancel(false)
-        val w = ws; ws = null
-        gen++
-        w?.close(1000, null)
+        pollTask?.cancel(false); pollTask = null
+        polling = false
+        running.clear()
     }
 
     private fun publish(s: Status) {
@@ -337,8 +339,11 @@ class DeviceVisionClient(
     }
 
     companion object {
-        private val BACKOFF_MS = longArrayOf(1000, 2000, 4000, 8000, 15_000)
+        private val BACKOFF_MS = longArrayOf(2000, 4000, 8000, 16_000, 30_000)
         private val DEVICE_ID = Regex("^[A-Za-z0-9_-]{1,80}$")
+        private val JSON = "application/json".toMediaType()
+        private const val MAX_JPEG = 262_144
+        private val ERROR_CODES = setOf("CAMERA_UNAVAILABLE", "NO_FRAME", "PERMISSION_DENIED", "BUSY", "UNSUPPORTED_EVENT")
         const val DEFAULT_BASE_URL = "https://pre-live.hemaos.com"
 
         fun validate(c: Config): String? = when {
