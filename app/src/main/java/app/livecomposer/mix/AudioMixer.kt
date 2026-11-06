@@ -172,8 +172,8 @@ class AudioMixer(val sampleRate: Int, val channels: Int, private val now: () -> 
         const val ENCODING_PCM_FLOAT = 4
         const val TARGET_LATENCY_MS = 120
         const val MAX_LATENCY_MS = 400
-        const val STEP_MS = 80
-        const val ADAPT_MAX_MS = 480
+        const val STEP_MS = 60
+        const val ADAPT_MAX_MS = 240
         const val RELAX_MS = 20_000L
     }
 }
