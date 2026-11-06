@@ -1,7 +1,7 @@
 /*
  * LiveComposer 网页音频桥：在网页里把声音转给 App 混进直播，而不是从手机外放。
  * - Web Audio：拦截所有连到 AudioContext.destination 的连接（离线渲染的 OfflineAudioContext 除外），
- *   改接到一个采样节点，PCM 经 JS 接口送给 App；本机输出被静音（避免外放、避免麦克风再收进去形成回声）。
+ *   改接到一个采样节点（优先 AudioWorklet，在音频线程采样，主线程卡顿也不丢数据；不支持时退回 ScriptProcessor），PCM 经 JS 接口送给 App；本机输出被静音（避免外放、避免麦克风再收进去形成回声）。
  * - <audio> / <video> / new Audio()：播放时接入一个共享 AudioContext，走同样的路径；
  *   用 MediaStream 播放的（srcObject，例如 WebRTC）用 createMediaStreamSource 接入，并把元素本身静音。
  * - 接不进来的媒体元素直接静音，保证手机不外放；跨域且服务器没开 CORS 的媒体，浏览器出于安全只给静音数据，采不到。
@@ -15,7 +15,7 @@
   window.__lcAudioHooked = true;
 
   var frameId = Math.random().toString(36).slice(2);
-  var st = { ctx: 0, el: 0, stream: 0, muted: 0, cors: 0, err: '' };
+  var st = { ctx: 0, el: 0, stream: 0, muted: 0, cors: 0, worklet: 0, err: '' };
   var statusTimer = 0;
   function report() {
     if (statusTimer) return;
@@ -45,32 +45,70 @@
     return btoa(s);
   }
 
+  function send(t, ctx, L, R) {
+    var n = L.length, out = new Int16Array(n * 2);
+    for (var i = 0; i < n; i++) {
+      out[2 * i] = Math.max(-1, Math.min(1, L[i])) * 32767;
+      out[2 * i + 1] = Math.max(-1, Math.min(1, R[i])) * 32767;
+    }
+    try { B.pcm(toB64(out), ctx.sampleRate | 0, 2); } catch (_) {}
+  }
+
+  // AudioWorklet 采样：在音频线程攒满 2048 帧后 postMessage 到主线程。
+  // 主线程忙（网页动画、WebGL 渲染）时消息只是排队晚到、不会丢；
+  // ScriptProcessor 在主线程跟不上时会直接丢数据，声音就一卡一卡的，所以只作兜底。
+  var WORKLET_SRC =
+    "class LcTap extends AudioWorkletProcessor{constructor(){super();this.n=0;this.L=new Float32Array(2048);this.R=new Float32Array(2048);this.any=false;this.active=false;}" +
+    "process(ins,outs){var i=ins[0]||[],o=outs[0]||[],l=i[0],r=i.length>1?i[1]:l,m=o.length?o[0].length:128;" +
+    "for(var k=0;k<m;k++){var a=l?l[k]:0,b=r?r[k]:0;if(o[0])o[0][k]=a;if(o[1])o[1][k]=b;if(a!==0||b!==0)this.any=true;this.L[this.n]=a;this.R[this.n]=b;this.n++;" +
+    "if(this.n===2048){if(this.any||this.active){this.port.postMessage({l:this.L,r:this.R},[this.L.buffer,this.R.buffer]);this.L=new Float32Array(2048);this.R=new Float32Array(2048);}" +
+    "this.active=this.any;this.any=false;this.n=0;}}return true;}}registerProcessor('lc-tap',LcTap);";
+  var workletUrl = null;
+  function workletFor(ctx) {
+    if (!ctx.audioWorklet || typeof AudioWorkletNode === 'undefined') return Promise.reject(new Error('no worklet'));
+    if (!workletUrl) workletUrl = URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'application/javascript' }));
+    return ctx.audioWorklet.addModule(workletUrl);
+  }
+
   function tapFor(ctx) {
     var t = taps.get(ctx);
     if (t) return t;
-    var sp = ctx.createScriptProcessor(2048, 2, 2);
+    // 所有连到 destination 的连接都改接到 input；input 后面先挂 ScriptProcessor，Worklet 就绪后换掉
+    var input = ctx.createGain();
     var mute = ctx.createGain();
     mute.gain.value = monitor;
-    t = { node: sp, mute: mute, active: false };
+    t = { node: input, mute: mute, active: false, worklet: false };
     allTaps.push(t);
+    var sp = ctx.createScriptProcessor(2048, 2, 2);
     sp.onaudioprocess = function (e) {
-      var ib = e.inputBuffer;
+      if (t.worklet) return;
+      var ib = e.inputBuffer, ob = e.outputBuffer;
       var L = ib.getChannelData(0), R = ib.numberOfChannels > 1 ? ib.getChannelData(1) : L;
-      var n = L.length, out = new Int16Array(n * 2), any = false;
-      for (var i = 0; i < n; i++) {
-        var l = L[i], r = R[i];
-        if (l !== 0 || r !== 0) any = true;
-        out[2 * i] = Math.max(-1, Math.min(1, l)) * 32767;
-        out[2 * i + 1] = Math.max(-1, Math.min(1, r)) * 32767;
-      }
+      // 透传给本机监听（音量由 mute 控制，默认 0）
+      ob.getChannelData(0).set(L); if (ob.numberOfChannels > 1) ob.getChannelData(1).set(R);
+      var any = false;
+      for (var i = 0; i < L.length; i++) if (L[i] !== 0 || R[i] !== 0) { any = true; break; }
       // 静音时不传（省桥接开销），但声音刚停时多传一块静音收尾
-      if (any || t.active) { try { B.pcm(toB64(out), ctx.sampleRate | 0, 2); } catch (_) {} }
+      if (any || t.active) send(t, ctx, L, R);
       t.active = any;
     };
+    origConnect.call(input, sp);
     origConnect.call(sp, mute);
     origConnect.call(mute, ctx.destination);
     taps.set(ctx, t);
     st.ctx++; report();
+    workletFor(ctx).then(function () {
+      var wn = new AudioWorkletNode(ctx, 'lc-tap', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: 'explicit' });
+      wn.port.onmessage = function (e) { send(t, ctx, e.data.l, e.data.r); };
+      t.worklet = true;
+      origConnect.call(input, wn);
+      origConnect.call(wn, mute);
+      try { input.disconnect(sp); sp.disconnect(); } catch (_) {}
+      sp.onaudioprocess = null;
+      st.worklet = (st.worklet || 0) + 1; report();
+    }).catch(function (e) {
+      st.err = st.err || ('worklet: ' + String((e && e.message) || e)).slice(0, 120); report();
+    });
     return t;
   }
 
