@@ -83,6 +83,41 @@ fun main() {
     val o2 = ShortArray(480); m2.mixInto(o2, o2.size)
     check("移除源后不再混入", o2.all { it.toInt() == 0 })
 
+    // 自适应缓冲：网页声音成批到达（主线程忙，间隔在 40ms 和 200ms 之间交替），麦克风每 20ms 取一块
+    var clock = 0L
+    val m3 = AudioMixer(48_000, 1) { clock }
+    m3.addSource("web"); m3.configure("web", 48_000, 1, AudioMixer.ENCODING_PCM_16BIT)
+    var phase = 0
+    fun burst(ms: Int) {
+        val n = 48 * ms
+        val b = ByteBuffer.allocate(n * 2).order(ByteOrder.LITTLE_ENDIAN)
+        for (i in 0 until n) { b.putShort((sin(2 * PI * 1000 * phase / 48_000.0) * 10000).toInt().toShort()); phase++ }
+        b.flip(); m3.write("web", b)
+    }
+    var gapsEarly = 0; var gapsLate = 0
+    // 网页持续产生声音，但只在主线程空闲时才送达：送达时把上次以来积攒的数据一次送出（晚到，不提前）
+    // 前 1 秒均匀到达（预充、稳定），之后主线程开始卡：送达间隔在 40ms 和 200ms 之间交替
+    var lastAt = 0; var nextAt = 1; var longGap = false
+    for (step in 0 until 500) { // 10 秒
+        if (step == nextAt) {
+            burst((step - lastAt) * 20); lastAt = step
+            nextAt += if (step < 50) 1 else if (longGap) 2 else 10; if (step >= 50) longGap = !longGap
+        }
+        val blk = ShortArray(960); m3.mixInto(blk, blk.size)
+        val silent = blk.count { it.toInt() == 0 } > 100
+        if (silent && step >= 50) { if (step < 150) gapsEarly++ else if (step >= 350) gapsLate++ }
+        clock += 20_000_000L
+    }
+    check("成批到达时先出现断续（复现）", gapsEarly > 0, "$gapsEarly 块")
+    check("自动加大缓冲后不再断续", gapsLate == 0, "卡顿开始后 2 秒内断续块 $gapsEarly，最后 3 秒 $gapsLate，缓冲 ${m3.targetMs("web")}ms")
+    // 改为均匀到达，20 秒无欠载后逐步回落
+    for (step in 0 until 3000) { burst(20); val blk = ShortArray(960); m3.mixInto(blk, blk.size); clock += 20_000_000L }
+    check("到达恢复均匀后缓冲逐步回落", m3.targetMs("web") < 300, "${m3.targetMs("web")}ms")
+
+    // 极端卡顿（每 600ms 才送达一次）：缓冲最多加到上限，不再继续拉大音画偏差
+    for (step in 0 until 300) { if (step % 30 == 0) burst(600); val blk = ShortArray(960); m3.mixInto(blk, blk.size); clock += 20_000_000L }
+    check("缓冲不超过上限 ${AudioMixer.ADAPT_MAX_MS}ms（保音画同步）", m3.targetMs("web") <= AudioMixer.ADAPT_MAX_MS, "${m3.targetMs("web")}ms")
+
     if (failed > 0) { println("$failed 项失败"); exitProcess(1) }
     println("ALL MIXER CHECKS PASSED")
 }
