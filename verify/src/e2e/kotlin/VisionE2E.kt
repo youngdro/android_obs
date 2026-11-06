@@ -244,7 +244,7 @@ fun main() {
 
     // 10. 404 低频重试
     mb.pollStatus = 404
-    check("会话未关联（404）时进入重试并提示", waitState(DeviceVisionClient.State.RETRYING), lastRef.get().message ?: "")
+    check("会话未关联（404）时进入重试并提示错误码", waitState(DeviceVisionClient.State.RETRYING) && lastRef.get().message?.contains("SESSION_NOT_FOUND") == true, lastRef.get().message ?: "")
     val c404 = mb.polls.size; Thread.sleep(1500)
     check("404 低频重试（1.5 秒内不再请求，正式为 8 秒）", mb.polls.size == c404)
     mb.pollStatus = 200

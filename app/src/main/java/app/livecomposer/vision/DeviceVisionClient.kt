@@ -147,7 +147,13 @@ class DeviceVisionClient(
             httpCode == 401 -> stopWith("设备接入密钥不正确（401），请检查后重新连接")
             httpCode == 400 || httpCode == 415 -> stopWith("请求参数不被接受（${code.ifEmpty { "$httpCode" }}），请检查 liveId")
             httpCode == 404 -> {
-                publish(status.copy(state = State.RETRYING, message = "没有找到这个直播间的关联会话，请先在助播控制台关联直播间，8 秒后重试"))
+                val why = when {
+                    code == "SESSION_NOT_FOUND" -> "服务端没有找到 liveId=${config?.liveId} 的关联会话（SESSION_NOT_FOUND），请在助播控制台关联该直播间或确认会话未结束"
+                    code.isEmpty() -> "服务端没有这个接口（HTTP 404，无错误码），可能接口未部署或域名不对"
+                    else -> "服务端返回 404 $code"
+                }
+                val detail = o?.optString("error").orEmpty().take(80)
+                publish(status.copy(state = State.RETRYING, message = why + (if (detail.isNotEmpty() && detail != code) "：$detail" else "") + "，8 秒后重试"))
                 schedulePoll(scaled(8000))
             }
             httpCode == 429 -> {
