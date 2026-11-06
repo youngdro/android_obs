@@ -16,12 +16,25 @@ android {
         versionName = "0.8.0"
     }
 
+    // 固定的开发签名（仓库内提交，非正式发布密钥）：CI 每次打包签名一致，新版本可以直接覆盖安装、保留配置
+    signingConfigs {
+        create("dev") {
+            storeFile = file("livecomposer-dev.keystore")
+            storePassword = "android"
+            keyAlias = "livecomposer"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("dev")
+        }
         release {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
-            // 正式发布时替换为自己的签名配置；当前 release 用 debug 签名，便于直接安装验证
-            signingConfig = signingConfigs.getByName("debug")
+            // 正式发布时替换为自己的签名配置；当前用仓库内的开发签名，便于直接安装验证
+            signingConfig = signingConfigs.getByName("dev")
         }
     }
 
