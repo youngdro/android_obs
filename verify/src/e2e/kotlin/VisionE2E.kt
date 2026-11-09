@@ -76,6 +76,7 @@ class Mailbox : Dispatcher() {
     val acks = LinkedBlockingQueue<Pair<RecordedRequest, JSONObject>>()
     val inFlight = AtomicInteger(); @Volatile var overlap = false
     @Volatile var pollStatus = 200
+    @Volatile var forceError: Pair<Int, String>? = null
     @Volatile var pollAfterMs = 300L
     /** 回执响应：返回 (http, code)；null 表示正常 200。 */
     @Volatile var ackFail: ((Int) -> Pair<Int, String>?)? = null
@@ -90,6 +91,7 @@ class Mailbox : Dispatcher() {
             try {
                 Thread.sleep(30)
                 polls.add(System.currentTimeMillis()); pollReqs.add(request)
+                forceError?.let { (h, c) -> return err(h, c) }
                 if (pollStatus != 200) return err(pollStatus, when (pollStatus) { 404 -> "SESSION_NOT_FOUND"; 503 -> "NOT_CONFIGURED"; else -> "X" })
                 val now = System.currentTimeMillis()
                 val out = org.json.JSONArray()
@@ -255,6 +257,17 @@ fun main() {
     check("接入密钥错误（401）时停止并提示", waitState(DeviceVisionClient.State.STOPPED), lastRef.get().message ?: "")
     val c401 = mb.polls.size; Thread.sleep(1200)
     check("401 后不再轮询", mb.polls.size == c401)
+
+    // 11b. 截图凭证过期 / 范围不符：停止并提示重新拉取配置
+    mb.pollStatus = 200
+    client.start(cfg); waitState(DeviceVisionClient.State.ONLINE)
+    mb.forceError = 401 to "TOKEN_EXPIRED"
+    check("截图凭证过期（TOKEN_EXPIRED）时停止并提示重新拉取配置", waitState(DeviceVisionClient.State.STOPPED) && lastRef.get().message?.contains("重新拉取") == true, lastRef.get().message ?: "")
+    mb.forceError = 403 to "SCOPE_MISMATCH"
+    client.start(cfg)
+    run { val end = System.currentTimeMillis() + 4000; while (System.currentTimeMillis() < end && lastRef.get().message?.contains("SCOPE_MISMATCH") != true) Thread.sleep(20) }
+    check("凭证范围不符（403）时停止并提示", lastRef.get().state == DeviceVisionClient.State.STOPPED && lastRef.get().message?.contains("SCOPE_MISMATCH") == true, lastRef.get().message ?: "")
+    mb.forceError = null
 
     // 12. 断开后不再轮询
     client.start(cfg)

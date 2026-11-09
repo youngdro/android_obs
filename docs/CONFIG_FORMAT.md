@@ -4,6 +4,8 @@
 
 ## 1. 服务端要实现的接口
 
+> 已部署：`https://pre-live.hemaos.com/api/tb-live-live2d/device-config`（App 默认地址），需要控制台生成的配置访问密钥（`lc_cfg_` 开头）。服务端会在响应头 `X-LiveComposer-Vision-Expires-At` 给出截图凭证有效期，App 在截图通道面板显示；截图凭证过期（`TOKEN_EXPIRED` / `TOKEN_REVOKED`）或范围不符（`SCOPE_MISMATCH`）时停止轮询并提示重新拉取配置。App 不跟随重定向。
+
 只需要一个 GET 接口，地址由服务端自定，在 App 里填写，例如 `https://example.com/api/livecomposer/device-config`。
 
 ### 请求（App 发出）

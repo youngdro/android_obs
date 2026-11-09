@@ -41,10 +41,12 @@ class ConfigActions(
     val onEditCloud: ((AppConfig) -> Unit) -> Unit,
     val onConfirmImport: () -> Unit,
     val onCancelImport: () -> Unit,
+    /** 开播前：按 liveId 拉取云端配置，成功后加载并自动开播。 */
+    val onPullAndGoLive: (String) -> Unit,
 )
 
 /** 待确认的配置（来自文件或云端）。 */
-class ImportPreview(val parsed: ConfigBundle.Parsed, val source: String)
+class ImportPreview(val parsed: ConfigBundle.Parsed, val source: String, val extra: String = "")
 
 /**
  * 整体配置：导出到文件、从文件加载、按 liveId 从云端一键加载。
@@ -75,15 +77,15 @@ fun ConfigPanel(state: EngineState, ui: StudioUi, act: ConfigActions, onClose: (
                 onChange = { v -> act.onEditCloud { it.cloudConfigUrl = v.trim() } })
             Field("liveId", cloud.liveId, { v -> act.onEditCloud { it.cloudLiveId = v.trim() } },
                 placeholder = "直播间 liveId", onChange = { v -> act.onEditCloud { it.cloudLiveId = v.trim() } })
-            Field("访问密钥（可选）", cloud.token, { v -> act.onEditCloud { it.cloudConfigToken = v.trim() } },
-                placeholder = "服务端要求鉴权时填写", secret = true,
+            Field("配置访问密钥", cloud.token, { v -> act.onEditCloud { it.cloudConfigToken = v.trim() } },
+                placeholder = "管理员在控制台生成，lc_cfg_ 开头", secret = true,
                 onChange = { v -> act.onEditCloud { it.cloudConfigToken = v.trim() } })
             val can = !locked && cloud.url.isNotBlank() && cloud.liveId.isNotBlank() && !ui.cloudLoading
             ActionRow(Icons.Rounded.CloudDownload,
                 when { locked -> "推流中不能加载"; ui.cloudLoading -> "正在获取…"; cloud.url.isBlank() -> "先填写配置接口地址"; cloud.liveId.isBlank() -> "先填写 liveId"; else -> "获取并加载" },
                 can) { act.onImportCloud() }
             ui.cloudError?.let { Text(it, color = Studio.Live, style = MaterialTheme.typography.bodySmall) }
-            Text("按 liveId 向服务端获取这场直播的配置，确认后一键设置好。地址、liveId 和密钥只存在本机，不会被导出。",
+            Text("按 liveId 向服务端获取这场直播的配置，确认后一键设置好。填好配置访问密钥后，每次点开播都可以先填 liveId 拉取配置再开播。地址、liveId 和密钥只存在本机，不会被导出。",
                 style = MaterialTheme.typography.bodySmall)
         }
     }
@@ -118,5 +120,13 @@ fun ImportPreview.describe(): String = buildString {
     append("\n\n加载后会替换这台手机现在的设置、图层")
     if (p.scenes != null) append("和场景")
     append("，画面会重新加载一次。本机设备 ID 不变。")
+    if (extra.isNotEmpty()) append("\n").append(extra)
     if (p.warnings.isNotEmpty()) append("\n\n注意：\n").append(p.warnings.joinToString("\n") { "· $it" })
+}
+
+/** 截图凭证有效期说明。 */
+fun visionExpiryText(expiresAt: Long, now: Long = System.currentTimeMillis()): String? {
+    if (expiresAt <= 0) return null
+    val t = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(expiresAt))
+    return if (expiresAt <= now) "截图凭证已于 $t 过期，请重新拉取云端配置" else "截图凭证有效期至 $t"
 }

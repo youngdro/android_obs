@@ -85,6 +85,9 @@ fun VisionPanel(state: EngineState, act: VisionActions, onClose: () -> Unit, mod
                         style = MaterialTheme.typography.bodySmall)
                 }
                 st.lastCapture?.let { Text("最近：$it", style = MaterialTheme.typography.bodySmall) }
+                visionExpiryText(v.keyExpiresAt)?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = if (v.keyExpiresAt <= System.currentTimeMillis()) Studio.Live else Studio.TextDim)
+                }
                 st.message?.let {
                     Text(it, style = MaterialTheme.typography.bodySmall,
                         color = if (st.state == State.STOPPED) Studio.Live else if (st.state == State.ONLINE) Studio.TextDim else Studio.Warn)

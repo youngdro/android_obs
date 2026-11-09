@@ -39,7 +39,7 @@
 | 系统网络监听：网络恢复立即重连，断网主动进入重连 | ✅ |
 | 音画同步测试信号 + `tools/av_sync.py` 自动测量 | ✅ |
 | 自动重连 1、2、5、10 秒递增，最大 10 秒；错误分类 | ✅ 云端实测 |
-| 整体配置导出 / 加载：设置、图层、场景（可选含密钥）存为 JSON 文件；按 liveId 从云端接口一键加载（格式与接口见 docs/CONFIG_FORMAT.md；`gradle -p verify configChecks`） | ✅ 需真机验证 |
+| 整体配置导出 / 加载：设置、图层、场景（可选含密钥）存为 JSON 文件；按 liveId 从云端接口一键加载（默认 pre-live.hemaos.com 的 device-config 接口，填配置访问密钥后开播时可先填 liveId 拉取配置再自动开播；拉取失败只提示、保留原设置；格式与接口见 docs/CONFIG_FORMAT.md；`gradle -p verify configChecks`） | ✅ 需真机验证 |
 | 配置保存与恢复（推流需手动开始） | ✅ |
 
 ## 操作速览

@@ -12,8 +12,8 @@ android {
         applicationId = "app.livecomposer"
         minSdk = 29          // Android 10 及以上
         targetSdk = 35
-        versionCode = 15
-        versionName = "0.9.0"
+        versionCode = 16
+        versionName = "0.9.1"
     }
 
     // 固定的开发签名（仓库内提交，非正式发布密钥）：CI 每次打包签名一致，新版本可以直接覆盖安装、保留配置

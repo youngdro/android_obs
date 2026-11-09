@@ -77,6 +77,7 @@ class StudioActivity : ComponentActivity() {
     // ---- 整体配置导出 / 加载
     private var exportSecrets = true
     private var pendingImport: app.livecomposer.core.ConfigBundle.Parsed? = null
+    private var pendingExpires = 0L
 
     private val exportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri: Uri? ->
         if (uri == null) return@registerForActivityResult
@@ -111,9 +112,23 @@ class StudioActivity : ComponentActivity() {
         }
     }
 
-    private fun showImport(p: app.livecomposer.core.ConfigBundle.Parsed, source: String) {
-        pendingImport = p
-        ui.importPreview = ImportPreview(p, source)
+    private fun showImport(p: app.livecomposer.core.ConfigBundle.Parsed, source: String, expires: Long = 0, extra: String = "") {
+        pendingImport = p; pendingExpires = expires
+        ui.importPreview = ImportPreview(p, source, extra)
+    }
+
+    /** 加载云端配置后重建界面，就绪后自动开播。 */
+    private fun goLiveWhenReady(deadline: Long = System.currentTimeMillis() + 15_000) {
+        if (!engine.isReady) {
+            if (System.currentTimeMillis() < deadline) main.postDelayed({ goLiveWhenReady(deadline) }, 300)
+            else engine.notify("配置已加载，但初始化超时，请手动开播")
+            return
+        }
+        // 留一点时间给摄像头和网页图层启动
+        main.postDelayed({
+            val err = engine.validateUrl() ?: engine.startStream()
+            if (err != null) { ui.urlError = err; engine.notify("配置已加载，但开播失败：$err") }
+        }, 1500)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -156,6 +171,7 @@ class StudioActivity : ComponentActivity() {
         initialized = true
         engine.init(pendingSurface, pendingW, pendingH)
         if (started) engine.onStart()
+        if (goLiveAfterRestart) { goLiveAfterRestart = false; goLiveWhenReady() }
     }
 
     private fun applyOrientation() {
@@ -236,7 +252,9 @@ class StudioActivity : ComponentActivity() {
                         engine.fetchCloudConfig { r ->
                             ui.cloudLoading = false
                             when (r) {
-                                is app.livecomposer.core.ConfigFetcher.Result.Ok -> showImport(r.parsed, "云端（liveId ${engine.config.cloudLiveId}）")
+                                is app.livecomposer.core.ConfigFetcher.Result.Ok -> showImport(r.parsed,
+                                    "云端（liveId ${engine.config.cloudLiveId}${if (r.revision.isNotEmpty()) "，修订 ${r.revision}" else ""}）",
+                                    r.visionExpiresAt, visionExpiryText(r.visionExpiresAt) ?: "")
                                 is app.livecomposer.core.ConfigFetcher.Result.Fail -> ui.cloudError = r.message
                             }
                         }
@@ -247,11 +265,36 @@ class StudioActivity : ComponentActivity() {
                     val p = pendingImport
                     pendingImport = null; ui.importPreview = null
                     if (p != null) {
-                        val err = engine.applyConfig(p)
+                        val err = engine.applyConfig(p, pendingExpires)
                         if (err != null) engine.notify(err) else ui.panel = Panel.NONE
                     }
                 },
                 onCancelImport = { pendingImport = null; ui.importPreview = null },
+                onPullAndGoLive = { liveId ->
+                    val lock = engine.configLockedReason()
+                    if (lock != null) ui.goLiveError = lock
+                    else {
+                        engine.updateCloudConfig { it.cloudLiveId = liveId.trim() }
+                        ui.cloudLoading = true; ui.goLiveError = null
+                        engine.fetchCloudConfig { r ->
+                            ui.cloudLoading = false
+                            when (r) {
+                                is app.livecomposer.core.ConfigFetcher.Result.Ok -> {
+                                    val err = engine.applyConfig(r.parsed, r.visionExpiresAt)
+                                    if (err != null) ui.goLiveError = err
+                                    else {
+                                        ui.goLivePrompt = false
+                                        goLiveAfterRestart = true
+                                        restartNotice = "已加载 liveId ${liveId.trim()} 的云端配置，正在开播" +
+                                            (r.parsed.warnings.filter { !it.contains("保留") }.takeIf { it.isNotEmpty() }?.joinToString("；", "（", "）") ?: "")
+                                    }
+                                }
+                                // 配置下发无效：只提示，保留现在的设置，用户可直接开播
+                                is app.livecomposer.core.ConfigFetcher.Result.Fail -> ui.goLiveError = r.message
+                            }
+                        }
+                    }
+                },
             ),
             vision = VisionActions(
                 onEdit = { edit -> engine.updateVision(edit) },
@@ -333,6 +376,8 @@ class StudioActivity : ComponentActivity() {
     companion object {
         /** 加载配置后重建界面，重建完显示的提示。 */
         private var restartNotice: String? = null
+        /** 开播前拉取的云端配置已加载：重建后自动开播。 */
+        private var goLiveAfterRestart = false
         private const val DIM_AFTER_MS = 60_000L
         private const val DIM_LEVEL = 0.15f
     }

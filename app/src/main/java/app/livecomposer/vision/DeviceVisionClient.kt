@@ -144,7 +144,11 @@ class DeviceVisionClient(
         }
         log("poll http=$httpCode code=$code")
         when {
-            httpCode == 401 -> stopWith("设备接入密钥不正确（401），请检查后重新连接")
+            httpCode == 401 && (code == "TOKEN_EXPIRED" || code == "TOKEN_REVOKED") ->
+                stopWith(if (code == "TOKEN_EXPIRED") "截图凭证已过期（TOKEN_EXPIRED），请重新拉取云端配置后再连接" else "截图凭证已被撤销（TOKEN_REVOKED），请重新拉取云端配置后再连接")
+            httpCode == 401 -> stopWith("设备接入密钥不正确（401${if (code.isNotEmpty()) " $code" else ""}），请检查或重新拉取云端配置")
+            httpCode == 403 -> stopWith("截图凭证与当前 liveId / 设备不匹配（${code.ifEmpty { "403" }}），请重新拉取云端配置")
+            httpCode == 409 -> backoff("直播间关联正在切换（${code.ifEmpty { "409" }}）")
             httpCode == 400 || httpCode == 415 -> stopWith("请求参数不被接受（${code.ifEmpty { "$httpCode" }}），请检查 liveId")
             httpCode == 404 -> {
                 val why = when {
@@ -318,7 +322,7 @@ class DeviceVisionClient(
             }
             if (state == "completed") publish(status.copy(failures = status.failures + 1, lastCapture = "${timeOf(now())} 发送失败：$why"))
         }
-        if (httpCode == 401) stopWith("设备接入密钥不正确（401），请检查后重新连接")
+        if (httpCode == 401) stopWith(if (code == "TOKEN_EXPIRED" || code == "TOKEN_REVOKED") "截图凭证已失效（$code），请重新拉取云端配置后再连接" else "设备接入密钥不正确（401），请检查或重新拉取云端配置")
     }
 
     // ------------------------------------------------------------------ 停止
