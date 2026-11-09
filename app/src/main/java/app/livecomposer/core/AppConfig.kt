@@ -128,6 +128,10 @@ data class AppConfig(
     var deviceId: String = "",
     /** 网页采集帧率，0 = 跟随输出帧率。 */
     var webCaptureFps: Int = 0,
+    /** 云端配置：接口地址、直播间 liveId、访问密钥（加密保存）。只属于本机，不随配置导出。 */
+    var cloudConfigUrl: String = "",
+    var cloudLiveId: String = "",
+    var cloudConfigToken: String = "",
     val layers: MutableList<Layer> = mutableListOf(),
 ) {
     val canvasWidth get() = if (orientation == CanvasOrientation.LANDSCAPE) resolution.long else resolution.short
@@ -142,40 +146,13 @@ data class AppConfig(
             val c = AppConfig()
             c.deviceId = deviceId(p)
             val json = p.getString("json", null) ?: return c.withDefaults(firstRun = true)
-            try {
-                val o = JSONObject(json)
-                c.orientation = CanvasOrientation.valueOf(o.optString("orientation", c.orientation.name))
-                c.resolution = Resolution.valueOf(o.optString("resolution", c.resolution.name))
-                c.fps = o.optInt("fps", 30)
-                c.videoBitrateKbps = o.optInt("videoBitrateKbps", 4000)
-                c.keyFrameIntervalSec = o.optInt("keyFrameIntervalSec", 2)
-                c.useFullUrl = o.optBoolean("useFullUrl", true)
-                c.serverUrl = o.optString("serverUrl")
-                c.zoom = o.optDouble("zoom", 1.0).toFloat()
-                c.micMuted = o.optBoolean("micMuted")
-                c.allowCleartextWeb = o.optBoolean("allowCleartextWeb")
-                c.webCaptureGpu = o.optBoolean("webCaptureGpu", true)
-                c.cameraRotationFix = o.optInt("cameraRotationFix", 0)
-                c.noiseSuppression = o.optBoolean("noiseSuppression", true)
-                c.powerSave = o.optBoolean("powerSave", true)
-                c.autoDim = o.optBoolean("autoDim", false)
-                c.monitorLocal = o.optBoolean("monitorLocal", false)
-                c.camAudio = o.optBoolean("camAudio", true)
-                c.camResolution = runCatching { Resolution.valueOf(o.optString("camResolution")) }.getOrDefault(Resolution.P720)
-                c.camBitrateKbps = o.optInt("camBitrateKbps", 2500)
-                c.visionBaseUrl = o.optString("visionBaseUrl", c.visionBaseUrl).ifBlank { "https://pre-live.hemaos.com" }
-                c.visionLiveId = o.optString("visionLiveId", "")
-                c.visionEnabled = o.optBoolean("visionEnabled", false)
-                c.webCaptureFps = o.optInt("webCaptureFps", 0)
-                val arr = o.optJSONArray("layers") ?: JSONArray()
-                for (i in 0 until arr.length()) c.layers.add(Layer.fromJson(arr.getJSONObject(i)))
-            } catch (_: Exception) {
-            }
+            try { c.applySettingsJson(JSONObject(json)) } catch (_: Exception) {}
             // 完整 URL 中也包含密钥，同样加密保存
             c.fullUrl = decrypt(p.getString("fullUrlEnc", null)) ?: ""
             c.camUrl = decrypt(p.getString("camUrlEnc", null)) ?: ""
             c.visionApiKey = decrypt(p.getString("visionApiKeyEnc", null)) ?: ""
             c.streamKey = decrypt(p.getString("streamKeyEnc", null)) ?: ""
+            c.cloudConfigToken = decrypt(p.getString("cloudConfigTokenEnc", null)) ?: ""
             return c.withDefaults(firstRun = false)
         }
 
@@ -235,24 +212,66 @@ data class AppConfig(
         return this
     }
 
-    fun save(ctx: Context) {
-        val o = JSONObject().apply {
-            put("orientation", orientation.name); put("resolution", resolution.name); put("fps", fps)
-            put("videoBitrateKbps", videoBitrateKbps); put("keyFrameIntervalSec", keyFrameIntervalSec)
-            put("useFullUrl", useFullUrl); put("serverUrl", serverUrl); put("zoom", zoom.toDouble())
-            put("micMuted", micMuted); put("allowCleartextWeb", allowCleartextWeb); put("webCaptureGpu", webCaptureGpu)
-            put("cameraRotationFix", cameraRotationFix); put("noiseSuppression", noiseSuppression)
-            put("powerSave", powerSave); put("autoDim", autoDim); put("monitorLocal", monitorLocal);
-            put("camAudio", camAudio);
-            put("visionBaseUrl", visionBaseUrl); put("visionLiveId", visionLiveId); put("visionEnabled", visionEnabled); put("camResolution", camResolution.name); put("camBitrateKbps", camBitrateKbps); put("webCaptureFps", webCaptureFps)
-            put("layers", JSONArray().apply { layers.forEach { put(it.toJson()) } })
+    /** 普通设置（不含密钥和本机设备 ID）+ 当前图层，用于保存与导出。 */
+    fun settingsJson(): JSONObject = JSONObject().apply {
+        put("orientation", orientation.name); put("resolution", resolution.name); put("fps", fps)
+        put("videoBitrateKbps", videoBitrateKbps); put("keyFrameIntervalSec", keyFrameIntervalSec)
+        put("useFullUrl", useFullUrl); put("serverUrl", serverUrl); put("zoom", zoom.toDouble())
+        put("micMuted", micMuted); put("allowCleartextWeb", allowCleartextWeb); put("webCaptureGpu", webCaptureGpu)
+        put("cameraRotationFix", cameraRotationFix); put("noiseSuppression", noiseSuppression)
+        put("powerSave", powerSave); put("autoDim", autoDim); put("monitorLocal", monitorLocal)
+        put("camAudio", camAudio); put("camResolution", camResolution.name); put("camBitrateKbps", camBitrateKbps)
+        put("visionBaseUrl", visionBaseUrl); put("visionLiveId", visionLiveId); put("visionEnabled", visionEnabled)
+        put("webCaptureFps", webCaptureFps)
+        put("cloudConfigUrl", cloudConfigUrl); put("cloudLiveId", cloudLiveId)
+        put("layers", JSONArray().apply { layers.forEach { put(it.toJson()) } })
+    }
+
+    /** 应用一份设置 JSON：缺少的键保留当前值；有 layers 时整体替换图层。不改本机设备 ID。 */
+    fun applySettingsJson(o: JSONObject) {
+        orientation = runCatching { CanvasOrientation.valueOf(o.getString("orientation")) }.getOrDefault(orientation)
+        resolution = runCatching { Resolution.valueOf(o.getString("resolution")) }.getOrDefault(resolution)
+        fps = o.optInt("fps", fps).coerceIn(15, 60)
+        videoBitrateKbps = o.optInt("videoBitrateKbps", videoBitrateKbps).coerceIn(300, 20_000)
+        keyFrameIntervalSec = o.optInt("keyFrameIntervalSec", keyFrameIntervalSec).coerceIn(1, 10)
+        useFullUrl = o.optBoolean("useFullUrl", useFullUrl)
+        serverUrl = o.optString("serverUrl", serverUrl)
+        zoom = o.optDouble("zoom", zoom.toDouble()).toFloat()
+        micMuted = o.optBoolean("micMuted", micMuted)
+        allowCleartextWeb = o.optBoolean("allowCleartextWeb", allowCleartextWeb)
+        webCaptureGpu = o.optBoolean("webCaptureGpu", webCaptureGpu)
+        cameraRotationFix = o.optInt("cameraRotationFix", cameraRotationFix).let { if (it in listOf(0, 90, 180, 270)) it else 0 }
+        noiseSuppression = o.optBoolean("noiseSuppression", noiseSuppression)
+        powerSave = o.optBoolean("powerSave", powerSave)
+        autoDim = o.optBoolean("autoDim", autoDim)
+        monitorLocal = o.optBoolean("monitorLocal", monitorLocal)
+        camAudio = o.optBoolean("camAudio", camAudio)
+        camResolution = runCatching { Resolution.valueOf(o.getString("camResolution")) }.getOrDefault(camResolution)
+        camBitrateKbps = o.optInt("camBitrateKbps", camBitrateKbps).coerceIn(300, 20_000)
+        visionBaseUrl = o.optString("visionBaseUrl", visionBaseUrl).ifBlank { "https://pre-live.hemaos.com" }
+        visionLiveId = o.optString("visionLiveId", visionLiveId)
+        visionEnabled = o.optBoolean("visionEnabled", visionEnabled)
+        webCaptureFps = o.optInt("webCaptureFps", webCaptureFps)
+        if (o.has("cloudConfigUrl")) cloudConfigUrl = o.optString("cloudConfigUrl")
+        if (o.has("cloudLiveId")) cloudLiveId = o.optString("cloudLiveId")
+        o.optJSONArray("layers")?.let { arr ->
+            layers.clear()
+            for (i in 0 until arr.length()) runCatching { layers.add(Layer.fromJson(arr.getJSONObject(i))) }
         }
+    }
+
+    /** 加载后的补全（例如没有摄像头图层时补上）。 */
+    fun ensureDefaults() { withDefaults(firstRun = false) }
+
+    fun save(ctx: Context) {
+        val o = settingsJson()
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString("json", o.toString())
             .putString("fullUrlEnc", try { encrypt(fullUrl) } catch (_: Exception) { "" })
             .putString("camUrlEnc", try { encrypt(camUrl) } catch (_: Exception) { "" })
             .putString("visionApiKeyEnc", try { encrypt(visionApiKey) } catch (_: Exception) { "" })
             .putString("streamKeyEnc", try { encrypt(streamKey) } catch (_: Exception) { "" })
+            .putString("cloudConfigTokenEnc", try { encrypt(cloudConfigToken) } catch (_: Exception) { "" })
             .apply()
     }
 }

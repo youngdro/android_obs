@@ -12,6 +12,8 @@ sourceSets {
         kotlin.srcDir("../app/src/main/java/app/livecomposer/mix")
         // 助播截图通道的协议客户端（纯 JVM 部分），截图实现依赖 Android，排除
         kotlin.srcDir("../app/src/main/java/app/livecomposer/vision")
+        kotlin.srcDir("../app/src/main/java/app/livecomposer/core")
+        kotlin.exclude("**/AppConfig.kt", "**/Scenes.kt")
         kotlin.exclude("**/CameraFrameGrabber.kt")
         kotlin.srcDir("src/e2e/kotlin")
     }
@@ -76,4 +78,12 @@ tasks.register<JavaExec>("visionE2E") {
     mainClass.set("VisionE2EKt")
     jvmArgs("-Dstdout.encoding=UTF-8", "-Dfile.encoding=UTF-8")
     args = (project.findProperty("e2eArgs") as String? ?: "").split(" ").filter { it.isNotBlank() }
+}
+
+tasks.register<JavaExec>("configChecks") {
+    group = "verification"
+    description = "整体配置导出 / 加载格式与云端获取"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("ConfigChecksKt")
+    jvmArgs("-Dstdout.encoding=UTF-8", "-Dfile.encoding=UTF-8")
 }

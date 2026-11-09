@@ -1,6 +1,9 @@
 package app.livecomposer.engine
 
 import android.app.Activity
+import app.livecomposer.core.ConfigBundle
+import app.livecomposer.core.ConfigFetcher
+import org.json.JSONArray
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -53,6 +56,8 @@ data class SceneInfo(
 
 /** 媒体图层播放状态。 */
 /** 助播截图通道的状态与设置。 */
+data class CloudConfigState(val url: String, val liveId: String, val token: String)
+
 data class VisionState(
     val status: DeviceVisionClient.Status,
     val baseUrl: String,
@@ -119,6 +124,7 @@ data class EngineState(
     /** 第二路（纯摄像头）推流。 */
     val cam: CamStreamState,
     val vision: VisionState,
+    val cloud: CloudConfigState = CloudConfigState("", "", ""),
     /** 网页采集帧率，0 = 跟随输出。 */
     val webCaptureFps: Int,
     val webGpu: Boolean,
@@ -149,6 +155,8 @@ data class EngineState(
 class StudioEngine(private val activity: Activity, private val webParent: ViewGroup) {
 
     var onChanged: (() -> Unit)? = null
+    /** 加载整体配置后需要整体重建（由 Activity 重建自己）。 */
+    var onRestartRequested: (() -> Unit)? = null
 
     val config: AppConfig = AppConfig.load(activity)
     private val sceneStore = SceneStore(activity)
@@ -230,6 +238,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
             syncTest = syncTest, noiseSuppression = config.noiseSuppression, webAudio = webAudio,
             powerSave = config.powerSave, autoDim = config.autoDim, monitorLocal = config.monitorLocal,
             vision = VisionState(visionStatus, config.visionBaseUrl, config.visionLiveId, config.visionApiKey, config.deviceId, config.visionEnabled),
+            cloud = CloudConfigState(config.cloudConfigUrl, config.cloudLiveId.ifEmpty { config.visionLiveId }, config.cloudConfigToken),
             cam = CamStreamState(stream2Active, stats2, stats2?.message ?: stream2EndMessage, config.camUrl, config.camAudio,
                 config.camResolution, config.camBitrateKbps), webCaptureFps = config.webCaptureFps, webGpu = config.webCaptureGpu, allowCleartext = config.allowCleartextWeb,
             cameraRotationFix = config.cameraRotationFix,
@@ -799,6 +808,79 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
     }
 
     fun stopCamStream() { if (ready) stream2.stop() }
+
+    // ------------------------------------------------------------------ 整体配置导出 / 加载
+
+    private val configFetcher = ConfigFetcher()
+
+    private fun appVersion(): String =
+        runCatching { activity.packageManager.getPackageInfo(activity.packageName, 0).versionName }.getOrNull() ?: ""
+
+    /** 导出整体配置（JSON 文本）。includeSecrets：是否包含推流地址、串流密钥、第二路地址、截图接入密钥。 */
+    fun exportConfig(includeSecrets: Boolean): String {
+        val secrets = if (includeSecrets) mapOf(
+            "fullUrl" to config.fullUrl, "streamKey" to config.streamKey,
+            "camUrl" to config.camUrl, "visionApiKey" to config.visionApiKey,
+        ) else null
+        val scenes = JSONArray().apply { sceneStore.scenes.forEach { put(it.toJson()) } }
+        return ConfigBundle.build(config.settingsJson(), secrets, scenes, sceneStore.activeId, appVersion(), System.currentTimeMillis())
+            .toString(2)
+    }
+
+    fun updateCloudConfig(edit: (AppConfig) -> Unit) {
+        edit(config)
+        config.save(activity)
+        changed()
+    }
+
+    /** 推流中（主推流或第二路）不能加载配置。 */
+    fun configLockedReason(): String? = when {
+        streamActive -> "直播中不能加载配置，请先停止推流"
+        ready && stream2.isActive -> "第二路推流中不能加载配置，请先停止第二路"
+        else -> null
+    }
+
+    /** 从云端获取配置（结果回到主线程）。 */
+    fun fetchCloudConfig(callback: (ConfigFetcher.Result) -> Unit) {
+        if (config.cloudLiveId.isBlank() && config.visionLiveId.isNotBlank()) config.cloudLiveId = config.visionLiveId
+        configFetcher.fetch(config.cloudConfigUrl, config.cloudLiveId, config.cloudConfigToken, appVersion(), config.deviceId) { r ->
+            main.post {
+                // 云端配置没写截图通道的 liveId 时，用查询时的 liveId
+                if (r is ConfigFetcher.Result.Ok && !r.parsed.settings.has("visionLiveId") && config.cloudLiveId.isNotBlank()) {
+                    r.parsed.settings.put("visionLiveId", config.cloudLiveId.trim())
+                }
+                callback(r)
+            }
+        }
+    }
+
+    /**
+     * 应用一份整体配置：替换设置、图层、场景（以及配置里带的密钥），保存后整体重建。
+     * 本机设备 ID、云端配置地址不变。返回错误信息或 null。
+     */
+    fun applyConfig(p: ConfigBundle.Parsed): String? {
+        configLockedReason()?.let { return it }
+        if (ready) vision.stop()
+        config.applySettingsJson(p.settings)
+        p.secrets?.let { s ->
+            s["fullUrl"]?.let { config.fullUrl = it; if (it.isNotEmpty() && !p.settings.has("useFullUrl")) config.useFullUrl = true }
+            s["streamKey"]?.let { config.streamKey = it }
+            s["camUrl"]?.let { config.camUrl = it }
+            s["visionApiKey"]?.let { config.visionApiKey = it }
+        }
+        if (config.resolution !in availableResolutions()) config.resolution = availableResolutions().last()
+        if (config.camResolution !in availableResolutions()) config.camResolution = Resolution.P720
+        config.ensureDefaults()
+        config.save(activity)
+        p.scenes?.let { arr ->
+            sceneStore.scenes.clear()
+            for (i in 0 until arr.length()) runCatching { sceneStore.scenes.add(Scene.fromJson(arr.getJSONObject(i))) }
+            sceneStore.activeId = p.activeSceneId
+            sceneStore.persist()
+        }
+        onRestartRequested?.invoke()
+        return null
+    }
 
     // ------------------------------------------------------------------ 助播截图通道
 
