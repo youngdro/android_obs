@@ -84,6 +84,7 @@ data class EngineState(
     val zoomMin: Float,
     val zoomMax: Float,
     val syncTest: Boolean,
+    val noiseSuppression: Boolean,
     val webGpu: Boolean,
     val allowCleartext: Boolean,
     val cameraRotationFix: Int,
@@ -181,7 +182,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
             renderFps = renderFps, webFps = webFps, webCaptureMs = web?.lastCaptureMs ?: 0.0, metrics = metrics,
             zoom = config.zoom,
             zoomMin = if (ready) camera.zoomRange.lower else 1f, zoomMax = if (ready) camera.zoomRange.upper else 1f,
-            syncTest = syncTest, webGpu = config.webCaptureGpu, allowCleartext = config.allowCleartextWeb,
+            syncTest = syncTest, noiseSuppression = config.noiseSuppression, webGpu = config.webCaptureGpu, allowCleartext = config.allowCleartextWeb,
             cameraRotationFix = config.cameraRotationFix,
             useFullUrl = config.useFullUrl, fullUrl = config.fullUrl, serverUrl = config.serverUrl, streamKey = config.streamKey,
             availableResolutions = availableResolutions(),
@@ -238,6 +239,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         )
         audio.muted = config.micMuted
         audio.micVolume = cameraLayer()?.volume ?: 1f
+        audio.noiseReducer.enabled = config.noiseSuppression
         stream = StreamController(compositor, audio, object : StreamController.Listener {
             override fun onStats(stats: StreamController.Stats) {
                 this@StudioEngine.stats = stats
@@ -715,6 +717,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         if (oldW != newW || oldH != newH) relayout(oldOrientation, oldW, oldH)
         config.save(activity)
         if (!ready) { changed(); return }
+        audio.noiseReducer.enabled = config.noiseSuppression
         if (oldW != newW || oldH != newH || oldFps != config.fps) compositor.configure(newW, newH, config.fps)
         if (oldW != newW || oldH != newH || oldGpu != config.webCaptureGpu || oldHttp != config.allowCleartextWeb || oldFps != config.fps) setupWebLayer()
         if (oldRes != config.resolution || oldRot != config.cameraRotationFix || oldW != newW) scheduleOpenCamera()

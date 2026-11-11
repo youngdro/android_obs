@@ -103,6 +103,11 @@ fun SettingsPanel(
             }
         }
 
+        Section("麦克风") {
+            SwitchRow("本地降噪", "压低风扇、空调、电流声等持续底噪，人声保留；在手机上实时处理，直播中可随时开关", state.noiseSuppression,
+                { v -> onApply { it.noiseSuppression = v } })
+        }
+
         Section("网页") {
             SwitchRow("GPU 采集网页", "关闭后使用 CPU 软件绘制兜底（兼容性好，性能较低）", state.webGpu,
                 { v -> onApply { it.webCaptureGpu = v } }, enabled = !locked)
@@ -118,6 +123,6 @@ fun SettingsPanel(
                 listOf(0, 90, 180, 270).forEach { d -> Chip("$d°", state.cameraRotationFix == d, { onApply { it.cameraRotationFix = d } }, enabled = !locked) }
             }
         }
-        Text("LiveComposer 0.5 · 直播中切到后台会自动停止推流", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
+        Text("LiveComposer 0.6 · 直播中切到后台会自动停止推流", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
     }
 }

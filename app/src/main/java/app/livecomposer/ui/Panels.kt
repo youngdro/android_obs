@@ -193,6 +193,7 @@ fun InspectorPanel(
     onReloadWeb: () -> Unit,
     onMedia: (id: String, uri: String, loop: Boolean) -> Unit,
     onReloadMedia: (String) -> Unit,
+    onNoiseSuppression: (Boolean) -> Unit,
     onRaise: () -> Unit,
     onLower: () -> Unit,
     onDelete: () -> Unit,
@@ -214,7 +215,7 @@ fun InspectorPanel(
         }
 
         if (layer.type == LayerType.MEDIA) MediaSection(state, layer, onMedia, onReloadMedia)
-        if (layer.type.hasAudio) AudioSection(state, layer, onUpdate)
+        if (layer.type.hasAudio) AudioSection(state, layer, onUpdate, onNoiseSuppression)
         if (layer.type == LayerType.WEB) WebSection(state, layer, onWeb, onReloadWeb)
         if (layer.type == LayerType.TEXT) TextSection(layer, onUpdate, onFitText)
 
@@ -328,8 +329,11 @@ private fun WebSection(state: EngineState, layer: Layer, onWeb: (String, Int, In
 /** 声音：音量（0~200%）与实时电平。 */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun AudioSection(state: EngineState, layer: Layer, onUpdate: (Layer) -> Unit) {
+private fun AudioSection(state: EngineState, layer: Layer, onUpdate: (Layer) -> Unit, onNoiseSuppression: (Boolean) -> Unit) {
     Section("声音") {
+        if (layer.type == LayerType.CAMERA) {
+            SwitchRow("本地降噪", "压低风扇、空调、电流声等持续底噪，人声保留", state.noiseSuppression, onNoiseSuppression)
+        }
         val level = state.audioLevels[layer.id] ?: 0f
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(if (layer.volume <= 0f) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp, null,

@@ -10,6 +10,7 @@ import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.util.Log
 import app.livecomposer.mix.AudioMixer
+import app.livecomposer.mix.NoiseReducer
 import app.livecomposer.rtmp.FlvMux
 import app.livecomposer.rtmp.MediaPacket
 import kotlin.math.log10
@@ -21,6 +22,8 @@ import kotlin.math.sqrt
  * - 采集在预览阶段就运行（用于电平显示），编码器只在推流时挂上；
  * - 静音时继续采集但送入全 0 PCM，接收端音频同步静音、时间轴不断；
  * - 时间戳基于 AudioRecord.getTimestamp() 与 System.nanoTime() 对齐（与视频同一时钟），避免长时间累积漂移。
+ * - 麦克风这一路先经过本地降噪（[NoiseReducer]，可开关），再调音量、混入其他媒体源；
+ *   降噪的固定延迟（约 10.7ms）从时间戳里扣掉，开关切换不影响音画同步。
  */
 class AudioPipeline(
     val sampleRate: Int = 48_000,
@@ -35,6 +38,8 @@ class AudioPipeline(
     @Volatile var muted = false
     /** 麦克风音量（即摄像头图层的音量），0..2。 */
     @Volatile var micVolume = 1f
+    /** 麦克风降噪（默认开启）。 */
+    val noiseReducer = NoiseReducer(channels)
     /** 其他媒体源（拉流、本地视频）的声音在这里混入麦克风这一路。 */
     val mixer = AudioMixer(sampleRate, channels)
     /** 音画同步测试：替换麦克风输入，在每个整秒（MONOTONIC）开始的 50ms 内输出 1kHz 提示音，其余静音。 */
@@ -117,13 +122,15 @@ class AudioPipeline(
             }
             val frames = n / channels
             // 该块第一个采样点的采集时间（纳秒，System.nanoTime 时基）
-            val ptsNs = if (r.getTimestamp(ts, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS) {
+            val rawPtsNs = if (r.getTimestamp(ts, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS) {
                 ts.nanoTime + (framesRead - ts.framePosition) * 1_000_000_000L / sampleRate
             } else {
                 if (startNs < 0) startNs = System.nanoTime() - frames * 1_000_000_000L / sampleRate
                 startNs + framesRead * 1_000_000_000L / sampleRate
             }
             framesRead += frames
+            noiseReducer.process(buf, frames)
+            val ptsNs = rawPtsNs - noiseReducer.latencyFrames * 1_000_000_000L / sampleRate
 
             // 电平（静音时显示 0）
             var sum = 0.0
