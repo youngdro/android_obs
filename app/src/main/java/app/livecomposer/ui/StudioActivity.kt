@@ -143,6 +143,14 @@ class StudioActivity : ComponentActivity() {
             onAddMedia = { uri, live -> engine.addMediaLayer(uri, live)?.id },
             onPickVideo = { videoPicker.launch(arrayOf("video/*")) },
             onMedia = { id, uri, loop -> engine.updateMedia(id, uri, loop) },
+            scenes = SceneActions(
+                onSave = { name -> engine.saveScene(name) },
+                onOverwrite = { id -> engine.overwriteScene(id) },
+                onApply = { id -> engine.applyScene(id); applyOrientation() },
+                onRename = { id, name -> engine.renameScene(id, name) },
+                onDelete = { id -> engine.deleteScene(id) },
+                onMove = { id, d -> engine.moveScene(id, d) },
+            ),
         )
     }
 
