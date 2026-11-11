@@ -289,11 +289,18 @@ fun HoldButton(label: String, modifier: Modifier = Modifier, onHold: (Boolean) -
 private fun GripperPanel(s: ArmSession, snap: ArmSession.Snapshot) {
     var g by remember { mutableStateOf(0f) }
     var force by remember { mutableStateOf(s.gripperForcePct.toFloat()) }
+    var squeeze by remember { mutableStateOf(s.gripSqueezePct.toFloat()) }
     Text("夹爪开合  ${snap.state?.gripper?.let { "%.0f%%".format(it * 100) } ?: "—"}", fontWeight = FontWeight.Bold)
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text("夹持力度 ${force.toInt()}%", Modifier.width(110.dp), fontSize = 13.sp)
-        Slider(force, { force = it }, onValueChangeFinished = { s.setGripperForce(force.toInt()) }, valueRange = 10f..80f, modifier = Modifier.weight(1f))
+        Slider(force, { force = it }, onValueChangeFinished = { s.setGripperForce(force.toInt()) }, valueRange = 10f..100f, modifier = Modifier.weight(1f))
     }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("压紧量 ${squeeze.toInt()}%", Modifier.width(110.dp), fontSize = 13.sp)
+        Slider(squeeze, { squeeze = it }, onValueChangeFinished = { s.setGripSqueeze(squeeze.toInt()) }, valueRange = 0f..40f, modifier = Modifier.weight(1f))
+    }
+    if (force > 70) Text("力度超过 70%：长时间夹持会发热，过热时舵机自我保护会松开，注意看温度", fontSize = 11.sp, color = Color(0xFFE5484D))
+    Text("夹到后再往里收多少；抓不紧就调大（锁定中也能调），力度是出力上限", fontSize = 11.sp, color = Color.Gray)
     val st = snap.state
     val held = st?.gripperLocked == true || st?.grasping == true
     Row(verticalAlignment = Alignment.CenterVertically) {

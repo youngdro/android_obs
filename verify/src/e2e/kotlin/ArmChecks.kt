@@ -337,7 +337,7 @@ fun main() {
         "锁定 ${arm3.state.gripperLocked} 开合 ${"%.2f".format(gc.toOpen(gs.pos.toInt()))}")
     arm3.setGripper(1.0); run3(1.0)
     arm3.playRecording(recJson); repeat(1500) { arm3.tick(0.02); sim3.step(0.02) }
-    check("锁定时滑条和回放都不动夹爪", abs(gc.toOpen(gs.pos.toInt()) - 0.3) < 0.02 && abs(gc.toOpen(gs.goal) - 0.27) < 0.02,
+    check("锁定时滑条和回放都不动夹爪", abs(gc.toOpen(gs.pos.toInt()) - 0.3) < 0.02 && abs(gc.toOpen(gs.goal) - 0.20) < 0.02,
         "开合 ${"%.2f".format(gc.toOpen(gs.pos.toInt()))} 目标 ${"%.2f".format(gc.toOpen(gs.goal))}")
     arm3.moveTo(home); run3(15.0)
     arm3.disable()
@@ -345,7 +345,9 @@ fun main() {
     val arm4 = ArmController(StsBus(sim3, 5), cal2); arm4.carryGripFrom(arm3)
     for (sv in sim3.servos.values) sv.goal = sv.pos.toInt()
     arm4.enable(); arm4.tick(0.02)
-    check("换控制器后握持锁定保留", arm4.state.gripperLocked && abs(gc.toOpen(gs.goal) - 0.27) < 0.02, "目标 ${"%.2f".format(gc.toOpen(gs.goal))}")
+    check("换控制器后握持锁定保留", arm4.state.gripperLocked && abs(gc.toOpen(gs.goal) - 0.20) < 0.02, "目标 ${"%.2f".format(gc.toOpen(gs.goal))}")
+    arm4.setGripSqueeze(0.25); arm4.tick(0.02)
+    check("锁定中调大压紧量", abs(gc.toOpen(gs.goal) - 0.05) < 0.02, "目标 ${"%.2f".format(gc.toOpen(gs.goal))}")
     arm4.releaseGrasp(); arm4.setGripper(0.8); repeat(100) { arm4.tick(0.02); sim3.step(0.02) }
     gs.stuckAt = null; gs.load = 0; repeat(100) { arm4.tick(0.02); sim3.step(0.02) }
     check("解除锁定后夹爪可以松开", !arm4.state.gripperLocked && abs(gc.toOpen(gs.pos.toInt()) - 0.8) < 0.03, "开合 ${"%.2f".format(gc.toOpen(gs.pos.toInt()))}")

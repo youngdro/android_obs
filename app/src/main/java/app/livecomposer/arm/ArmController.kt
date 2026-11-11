@@ -112,8 +112,21 @@ class ArmController(
     }
 
     /** 解除握持锁定（夹爪停在原处，之后可以用滑条松开）。 */
+    /**
+     * 压紧量：夹到东西后设定点再往里收多少（夹爪全程的比例）。
+     * 舵机是位置控制，设定点和实际位置差得越多、出力越大（直到力矩上限），夹爪和关节的回弹会吃掉一部分，所以要可调。
+     * 锁定中调整立即生效。
+     */
+    fun setGripSqueeze(frac: Double) {
+        gripSqueeze = frac.coerceIn(0.0, 0.4)
+        val c = graspContact
+        if (gripperLocked && c != null) gripperSet = max(0.0, c - gripSqueeze)
+    }
+    private var gripSqueeze = 0.10
+    private var graspContact: Double? = null
+
     /** 换控制器实例（比如改力矩上限）时把握持锁定接过来。 */
-    fun carryGripFrom(o: ArmController) { if (o.gripperLocked) { gripperLocked = true; gripperSet = o.gripperSet; gripperForce = o.gripperForce ?: gripperForce } }
+    fun carryGripFrom(o: ArmController) { if (o.gripperLocked) { gripperLocked = true; gripperSet = o.gripperSet; graspContact = o.graspContact; gripSqueeze = o.gripSqueeze; gripperForce = o.gripperForce ?: gripperForce } }
 
     fun releaseGrasp() { grasping = false; gripperLocked = false; log("已解除握持锁定") }
 
@@ -421,9 +434,10 @@ class ArmController(
         val pos = bus.position(g.servoId)?.let { g.toOpen(it) }
         if (load > config.graspLoad && pos != null) {
             // 夹住了：设定点放在实际位置再往里一点，力度由夹爪力矩上限决定
-            gripperSet = max(0.0, pos - 0.03)
+            graspContact = pos
+            gripperSet = max(0.0, pos - gripSqueeze)
             grasping = false; gripperLocked = true
-            log("已夹住（负载 $load），夹爪锁定")
+            log("已夹住（负载 $load），夹爪锁定，压紧量 ${"%.0f".format(gripSqueeze * 100)}%")
             return
         }
         val cur = gripperSet ?: pos ?: 0.0

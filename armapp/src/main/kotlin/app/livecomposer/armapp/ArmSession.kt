@@ -81,6 +81,7 @@ class ArmSession(val cal: ArmCalibration, private val dataDir: File) {
             val a = ArmController(StsBus(l), cal, ArmController.Config(torqueLimitPermille = torquePct * 10, abortLoad = maxOf(400, torquePct * 10 - 50))) { say(it) }
             arm = a
             a.setGripperForce(gripperForcePct * 10)
+            a.setGripSqueeze(gripSqueezePct / 100.0)
             a.carryGripFrom(old)
             if (a.enable()) say("已上力（力矩上限 $torquePct%）") else say("上力失败：${a.state.fault}")
         }
@@ -133,6 +134,9 @@ class ArmSession(val cal: ArmCalibration, private val dataDir: File) {
 
     @Volatile var gripperForcePct = 40; private set
     fun setGripperForce(pct: Int) { gripperForcePct = pct; post { it.setGripperForce(pct * 10) } }
+    /** 压紧量（夹爪全程的百分比），锁定中调整立即生效。 */
+    @Volatile var gripSqueezePct = 10; private set
+    fun setGripSqueeze(pct: Int) { gripSqueezePct = pct; post { it.setGripSqueeze(pct / 100.0) } }
 
     fun deleteRecording(name: String) = post { recordings.removeAll { it.name == name }; saveRecordings() }
 
