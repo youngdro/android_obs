@@ -10,15 +10,24 @@ import kotlin.math.PI
 class SerialLink(path: String, baud: Int = 1_000_000) : ArmLink {
     private val port = SerialPort.getCommPort(path).apply {
         setComPortParameters(baud, 8, SerialPort.ONE_STOP_BIT, SerialPort.NO_PARITY)
-        setComPortTimeouts(SerialPort.TIMEOUT_READ_SEMI_BLOCKING, 5, 0)
+        setFlowControl(SerialPort.FLOW_CONTROL_DISABLED)
+        // macOS + CH343 下半阻塞读总是返回 0，改为非阻塞轮询（2026-11-11 实机验证）
+        setComPortTimeouts(SerialPort.TIMEOUT_NONBLOCKING, 0, 0)
         require(openPort()) { "打不开串口 $path" }
     }
     private val buf = ByteArray(256)
     override fun write(bytes: ByteArray) { port.writeBytes(bytes, bytes.size) }
     override fun read(timeoutMs: Int): ByteArray {
-        port.setComPortTimeouts(SerialPort.TIMEOUT_READ_SEMI_BLOCKING, timeoutMs, 0)
-        val n = port.readBytes(buf, buf.size)
-        return if (n > 0) buf.copyOf(n) else ByteArray(0)
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+        while (true) {
+            val av = port.bytesAvailable()
+            if (av > 0) {
+                val n = port.readBytes(buf, minOf(av, buf.size))
+                return if (n > 0) buf.copyOf(n) else ByteArray(0)
+            }
+            if (System.nanoTime() >= deadline) return ByteArray(0)
+            Thread.sleep(0, 200_000)
+        }
     }
     override fun drain() { while (port.bytesAvailable() > 0) port.readBytes(buf, minOf(buf.size, port.bytesAvailable())) }
     override fun close() { port.closePort() }
@@ -93,9 +102,8 @@ fun main(args: Array<String>) {
                     null -> {}
                     "help" -> println("status / on [力矩%] / off / move a1..a6 [秒] / joint i 角度 [秒] / grip 0..1 / home [秒] / level on|off / jog i 比例 秒 / rec 名称 / key [秒] [停留] / save / play 名称 / list / stop / quit")
                     "status" -> {
-                        if (arm.state.mode == ArmController.Mode.OFF) arm.readPose()
-                        val s = arm.state
-                        println("模式 ${s.mode}${s.fault?.let { "（$it）" } ?: ""}  关节 ${s.q.joinToString(" ") { deg(it) }}  夹爪 ${s.gripper?.let { "%.2f".format(it) }}  负载 ${s.loads.joinToString(" ")}")
+                        if (arm.state.mode == ArmController.Mode.OFF && !arm.readPose()) println("读位置失败：舵机无应答，检查供电和串口")
+                        else arm.state.let { s -> println("模式 ${s.mode}${s.fault?.let { "（$it）" } ?: ""}  关节 ${s.q.joinToString(" ") { deg(it) }}  夹爪 ${s.gripper?.let { "%.2f".format(it) }}  负载 ${s.loads.joinToString(" ")}") }
                     }
                     "on" -> {
                         val pct = p.getOrNull(1)?.toInt() ?: 40
