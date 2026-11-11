@@ -358,8 +358,10 @@ private fun selfTest(s: ArmSession) {
         return false
     }
     val idle = { sn: ArmSession.Snapshot -> sn.state?.mode == ArmController.Mode.IDLE }
+    // 命令是排队执行的：先等它开始动，再等它停下
+    fun waitMove(maxS: Double) { waitFor(2.0) { it.state?.mode == ArmController.Mode.MOVING }; waitFor(maxS, idle) }
     s.connect(ArmSession.SIM); Thread.sleep(500); s.enable(55); Thread.sleep(500); log("上力")
-    s.home(); waitFor(20.0, idle); log("回零")
+    s.home(); waitMove(20.0); log("回零")
     val z0 = s.snapshot.tool!!.z
     s.heldToolFrame = false; s.heldToolJog = doubleArrayOf(0.0, 0.0, 0.03, 0.0, 0.0, 0.0); Thread.sleep(2000); s.heldToolJog = null
     Thread.sleep(500); log("点动 Z+ 2 秒（应升高约 60 mm，实际 ${"%.0f".format((s.snapshot.tool!!.z - z0) * 1000)} mm）")
@@ -369,7 +371,7 @@ private fun selfTest(s: ArmSession) {
     s.heldJointJog = doubleArrayOf(0.5, 0.0, 0.0, 0.0, 0.0, 0.0); Thread.sleep(1000); s.heldJointJog = null
     Thread.sleep(500); val endPose = s.snapshot.tool; log("录制中动作完成")
     s.stopRecording("自检"); Thread.sleep(500); log("结束录制，共 ${s.snapshot.recordings.size} 条")
-    s.home(); waitFor(20.0, idle); log("回零")
+    s.home(); waitMove(20.0); log("回零")
     s.play("自检", 1.0)
     waitFor(10.0) { it.state?.mode == ArmController.Mode.PLAYBACK }; log("回放中")
     waitFor(60.0, idle)

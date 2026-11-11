@@ -132,6 +132,7 @@ class ArmSession(val cal: ArmCalibration, private val dataDir: File) {
     private fun loop(a0: ArmController, port: String) {
         var last = System.nanoTime()
         var n = 0
+        var prevMode: ArmController.Mode? = null
         while (running) {
             val a = arm ?: break
             while (true) { val c = commands.poll() ?: break; try { c(a) } catch (e: Exception) { say("出错：${e.message}") } }
@@ -142,6 +143,10 @@ class ArmSession(val cal: ArmCalibration, private val dataDir: File) {
             val st0 = armNow.state
             if (st0.mode == ArmController.Mode.OFF && recState == RecordingState.IDLE && n % 5 == 0) armNow.readPose()
             armNow.tick(dt)
+            val modeNow = armNow.state.mode
+            if (prevMode == ArmController.Mode.PLAYBACK && modeNow == ArmController.Mode.IDLE) say("回放结束")
+            if (prevMode == ArmController.Mode.MOVING && modeNow == ArmController.Mode.IDLE && message?.startsWith("前往") == true) say("已到达")
+            prevMode = modeNow
             if (recState == RecordingState.GOING_HOME && armNow.state.mode == ArmController.Mode.IDLE) {
                 if (recHand) armNow.disable()
                 armNow.startRecording(); recStartedAt = System.nanoTime()

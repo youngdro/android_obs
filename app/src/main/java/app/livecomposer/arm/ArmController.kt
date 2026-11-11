@@ -362,6 +362,14 @@ class ArmController(
 
     /** 空间点动一步：当前设定点的夹爪位姿按速度挪一点，逆解（从当前关节角出发）够得着才走，关节速度超限就按比例放慢。 */
     private fun jogToolStep(dtS: Double) {
+        // 起点就在包络里（例如刚上力时手腕在 0°、小臂收拢）：先以点动速度把手腕转出来，再开始空间点动
+        cal.wristEnvelope?.minWrist(setpoint)?.let { m ->
+            if (setpoint[4] < m - 1e-6) {
+                setpoint[4] = min(m, setpoint[4] + config.jogVelRad * dtS)
+                setpoint = clampAll(setpoint); toolTarget = null; toolBlocked = false
+                return
+            }
+        }
         // 目标位姿单独积分，不每步从设定点重算，否则逆解每步的小残差会累积成“走不够”
         val (p, r) = toolTarget ?: ik.fk(setpoint)
         val dv = doubleArrayOf(toolVel[0] * dtS, toolVel[1] * dtS, toolVel[2] * dtS)

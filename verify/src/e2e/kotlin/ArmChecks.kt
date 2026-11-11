@@ -233,6 +233,16 @@ fun main() {
     check("零位夹爪朝下", Math.toDegrees(zeroTool.pitch) < -80, "零位夹爪 ${"%.0f".format(zeroTool.x * 1000)} ${"%.0f".format(zeroTool.y * 1000)} ${"%.0f".format(zeroTool.z * 1000)} mm，仰角 ${"%.0f".format(Math.toDegrees(zeroTool.pitch))}°")
 
     // 7. 控制器：空间移动、空间点动、录制回放（arm2 标定 + 模拟总线）
+    // 先从“手腕在 0°、小臂收拢”（在包络里）上力后直接空间点动：应先转出手腕，再往上走
+    run {
+        val simH = SimBus(cal2.servoIds, cal2.joints.associate { it.servoId to it.zeroTick } + (7 to cal2.gripper!!.closedTick))
+        val armH = ArmController(StsBus(simH, 5), cal2)
+        armH.enable()
+        val z0 = armH.ik.fk(armH.state.setpoint).first[2]
+        repeat(100) { armH.jogTool(doubleArrayOf(0.0, 0.0, 0.03, 0.0, 0.0, 0.0)); armH.tick(0.02); simH.step(0.02) }
+        val z1 = armH.ik.fk(armH.state.setpoint).first[2]
+        check("零位上力后直接空间点动", z1 - z0 > 0.03 && !armH.state.toolBlocked, "升高 ${"%.0f".format((z1 - z0) * 1000)} mm")
+    }
     val sim3 = SimBus(cal2.servoIds, start2)
     val arm3 = ArmController(StsBus(sim3, 5), cal2)
     arm3.enable()
