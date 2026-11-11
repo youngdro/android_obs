@@ -65,6 +65,8 @@ class WebOverlaySource(
         fun onOutputVisibilityChanged(visible: Boolean)
         /** 实测的网页 CSS 视口尺寸，用于核对“渲染视口”设置。 */
         fun onViewportMeasured(cssWidth: Int, cssHeight: Int, dpr: Float)
+        /** 网页声音接管情况（给用户看的一句话），null = 尚无声音。 */
+        fun onAudioStatus(summary: String?) {}
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -259,9 +261,36 @@ class WebOverlaySource(
     }
 
     /** 网页音频桥：JS 送来 16 位交错 PCM（Base64），转给混音器。运行在 WebView 的 JS 桥线程。 */
+    /** 各 frame（含 iframe）报来的接管情况，页面切换时清空。 */
+    private val audioFrames = java.util.concurrent.ConcurrentHashMap<String, IntArray>()
+    @Volatile private var audioErr: String = ""
+
+    private fun publishAudioStatus() {
+        var ctx = 0; var el = 0; var stream = 0; var muted = 0; var cors = 0
+        for (a in audioFrames.values) { ctx += a[0]; el += a[1]; stream += a[2]; muted += a[3]; cors += a[4] }
+        val parts = mutableListOf<String>()
+        if (el + stream > 0) parts += "已接管 ${el + stream} 个音视频元素"
+        if (ctx > 0 && el + stream == 0) parts += "已接管 Web Audio"
+        if (cors > 0) parts += "$cors 个跨域媒体可能没有声音（服务器未开 CORS）"
+        if (muted > 0) parts += "$muted 个无法接管，已在本机静音${if (audioErr.isNotEmpty()) "（$audioErr）" else ""}"
+        val s = if (parts.isEmpty()) null else parts.joinToString("；")
+        main.post { listener.onAudioStatus(s) }
+    }
+
     private inner class AudioBridge {
         private var rate = 0
         private var channels = 0
+
+        @JavascriptInterface
+        fun status(frameId: String, json: String) {
+            try {
+                val o = org.json.JSONObject(json)
+                audioFrames[frameId] = intArrayOf(o.optInt("ctx"), o.optInt("el"), o.optInt("stream"), o.optInt("muted"), o.optInt("cors"))
+                o.optString("err").takeIf { it.isNotEmpty() }?.let { audioErr = it }
+                publishAudioStatus()
+            } catch (_: Exception) {
+            }
+        }
 
         @JavascriptInterface
         fun pcm(b64: String, sampleRate: Int, ch: Int) {
@@ -276,10 +305,13 @@ class WebOverlaySource(
         }
     }
 
-    /** 不支持文档开始注入的旧 WebView：在页面开始 / 结束时各补注入一次（脚本自身防重复）。 */
-    private fun injectFallback(view: WebView) {
+    /**
+     * 补注入（脚本自身防重复）：不支持文档开始注入的旧 WebView 在页面开始 / 结束时各注入一次；
+     * 支持的也在加载完成时再补一次，覆盖文档开始注入匹配不到的页面（例如 file:// 本地页）。
+     */
+    private fun injectFallback(view: WebView, finished: Boolean) {
         val js = bridgeScript ?: return
-        if (!documentStartInjected) view.evaluateJavascript(js, null)
+        if (!documentStartInjected || finished) view.evaluateJavascript(js, null)
     }
 
     fun release() {
@@ -293,11 +325,13 @@ class WebOverlaySource(
     private inner class Client : WebViewClient() {
         override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
             host?.capturing = false
-            injectFallback(view)
+            audioFrames.clear(); audioErr = ""
+            main.post { listener.onAudioStatus(null) }
+            injectFallback(view, finished = false)
         }
 
         override fun onPageFinished(view: WebView, url: String?) {
-            injectFallback(view)
+            injectFallback(view, finished = true)
             val seq = loadSeq
             if (mainFrameError != null) return
             // 等页面首帧真正可绘制后再恢复采集，避免把白屏/半成品推出去
