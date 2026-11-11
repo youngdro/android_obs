@@ -10,9 +10,11 @@ import android.graphics.Typeface
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.Uri
+import android.content.Context
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.view.MotionEvent
 import android.view.Surface
 import android.view.ViewGroup
@@ -85,6 +87,9 @@ data class EngineState(
     val zoomMax: Float,
     val syncTest: Boolean,
     val noiseSuppression: Boolean,
+    val powerSave: Boolean,
+    /** 网页采集帧率，0 = 跟随输出。 */
+    val webCaptureFps: Int,
     val webGpu: Boolean,
     val allowCleartext: Boolean,
     val cameraRotationFix: Int,
@@ -182,7 +187,8 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
             renderFps = renderFps, webFps = webFps, webCaptureMs = web?.lastCaptureMs ?: 0.0, metrics = metrics,
             zoom = config.zoom,
             zoomMin = if (ready) camera.zoomRange.lower else 1f, zoomMax = if (ready) camera.zoomRange.upper else 1f,
-            syncTest = syncTest, noiseSuppression = config.noiseSuppression, webGpu = config.webCaptureGpu, allowCleartext = config.allowCleartextWeb,
+            syncTest = syncTest, noiseSuppression = config.noiseSuppression,
+            powerSave = config.powerSave, webCaptureFps = config.webCaptureFps, webGpu = config.webCaptureGpu, allowCleartext = config.allowCleartextWeb,
             cameraRotationFix = config.cameraRotationFix,
             useFullUrl = config.useFullUrl, fullUrl = config.fullUrl, serverUrl = config.serverUrl, streamKey = config.streamKey,
             availableResolutions = availableResolutions(),
@@ -469,7 +475,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         val l = webLayer() ?: run { webState = WebOverlaySource.LoadState.IDLE; return }
         compositor.releaseExternalSurface(l.id)
         val src = WebOverlaySource(activity, webParent, l.viewportW, l.viewportH, config.webCaptureGpu,
-            config.allowCleartextWeb, config.fps, object : WebOverlaySource.Listener {
+            config.allowCleartextWeb, webFpsTarget(), object : WebOverlaySource.Listener {
                 override fun onLoadStateChanged(state: WebOverlaySource.LoadState, message: String?) {
                     webState = state; webMessage = message; changed()
                 }
@@ -718,6 +724,8 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         config.save(activity)
         if (!ready) { changed(); return }
         audio.noiseReducer.enabled = config.noiseSuppression
+        web?.setCaptureFps(webFpsTarget())
+        updatePowerSave()
         if (oldW != newW || oldH != newH || oldFps != config.fps) compositor.configure(newW, newH, config.fps)
         if (oldW != newW || oldH != newH || oldGpu != config.webCaptureGpu || oldHttp != config.allowCleartextWeb || oldFps != config.fps) setupWebLayer()
         if (oldRes != config.resolution || oldRot != config.cameraRotationFix || oldW != newW) scheduleOpenCamera()
@@ -911,9 +919,42 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
             webFps = (w - lastWebFrames).coerceAtLeast(0).toInt()
             lastRendered = r; lastWebFrames = w
             if (perfTicks++ % 5 == 0) metrics = try { metricsSampler.sample() } catch (_: Exception) { null }
+            updatePowerSave()
+            checkThermal()
             changed()
             main.postDelayed(this, 1000)
         }
+    }
+
+    /** 网页实际采集帧率：设置值（0 = 跟随输出），不超过输出帧率。 */
+    private fun webFpsTarget(): Int = if (config.webCaptureFps > 0) minOf(config.webCaptureFps, config.fps) else config.fps
+
+    /** 直播省电：预览降到约 15fps（编码输出仍是完整帧率）。 */
+    private fun updatePowerSave() {
+        if (!ready) return
+        compositor.previewEvery = if (config.powerSave && streamActive) maxOf(1, config.fps / 15) else 1
+    }
+
+    private val power = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
+    private var thermalWarned = PowerManager.THERMAL_STATUS_NONE
+
+    /** 直播中手机过热时提醒一次（每升一级提醒一次）。 */
+    private fun checkThermal() {
+        val st = power.currentThermalStatus
+        if (st < PowerManager.THERMAL_STATUS_SEVERE) {
+            if (st < PowerManager.THERMAL_STATUS_MODERATE) thermalWarned = PowerManager.THERMAL_STATUS_NONE
+            return
+        }
+        if (st <= thermalWarned || !streamActive) return
+        thermalWarned = st
+        val tips = buildList {
+            if (config.resolution != Resolution.P720) add("降到 720p")
+            if (config.fps > 30) add("帧率降到 30")
+            if (web != null && webFpsTarget() > 15) add("网页刷新率调到 15fps 以下")
+            if (players.isNotEmpty()) add("减少视频图层")
+            add("给手机散热、取下手机壳")
+        }
+        notify("手机温度过高，系统可能会降频导致掉帧。建议：${tips.joinToString("、")}")
     }
 
     private fun logRow(st: StreamController.Stats) {

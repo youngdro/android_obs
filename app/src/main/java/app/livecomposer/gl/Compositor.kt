@@ -66,6 +66,9 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
     private class BitmapTex(val tex: Int, var w: Int, var h: Int)
     private val bitmaps = HashMap<String, BitmapTex>()
 
+    /** 预览每隔几帧画一次（直播省电：预览降帧，编码输出不受影响）。 */
+    @Volatile var previewEvery = 1
+
     @Volatile private var scene: List<RenderLayer> = emptyList()
     /** 摄像头图层在画布中的框（用于点击对焦坐标换算）；null 表示摄像头图层不可见。 */
     @Volatile private var cameraRect: FloatArray? = null
@@ -381,7 +384,7 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
             if (egl.swap(s)) encodedFrames++
         }
         // ---- 3. 输出到预览 ----
-        previewSurface?.let { s ->
+        previewSurface?.takeIf { previewEvery <= 1 || renderedFrames % previewEvery == 0L }?.let { s ->
             egl.makeCurrent(s)
             GLES20.glViewport(0, 0, previewW, previewH)
             GLES20.glClearColor(0f, 0f, 0f, 1f)

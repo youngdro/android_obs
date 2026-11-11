@@ -108,6 +108,17 @@ fun SettingsPanel(
                 { v -> onApply { it.noiseSuppression = v } })
         }
 
+        Section("省电与发热") {
+            SwitchRow("直播时省电", "预览画面降到约 15fps，45 秒无操作自动调暗屏幕（触摸恢复）；推流画面和帧率不受影响", state.powerSave,
+                { v -> onApply { it.powerSave = v } })
+            Text("网页刷新率（静态网页调低可明显降低发热）", style = MaterialTheme.typography.labelSmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(0 to "跟随输出", 15 to "15fps", 10 to "10fps", 5 to "5fps").forEach { (f, label) ->
+                    Chip(label, state.webCaptureFps == f, { onApply { it.webCaptureFps = f } })
+                }
+            }
+        }
+
         Section("网页") {
             SwitchRow("GPU 采集网页", "关闭后使用 CPU 软件绘制兜底（兼容性好，性能较低）", state.webGpu,
                 { v -> onApply { it.webCaptureGpu = v } }, enabled = !locked)
