@@ -12,7 +12,7 @@ const fs = require('fs');
       for (let i = 0; i < n; i += 2) { let v = (s.charCodeAt(2*i) | (s.charCodeAt(2*i+1) << 8)); if (v > 32767) v -= 65536;
         peak = Math.max(peak, Math.abs(v)); if ((v < 0) !== (prev < 0)) cross++; prev = v; }
       window.__calls.push({ rate, ch, frames: n / 2, peak, cross });
-    }, status: (id, json) => { window.__status = JSON.parse(json); } };
+    }, status: (id, json) => { window.__status = JSON.parse(json); }, monitor: () => 0 };
   });
   await p.addInitScript({ content: fs.readFileSync(process.argv[2], 'utf8') });
   await p.goto(process.argv[3]);

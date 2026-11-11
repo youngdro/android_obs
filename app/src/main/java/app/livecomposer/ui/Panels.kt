@@ -66,6 +66,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.livecomposer.core.AppConfig
 import app.livecomposer.core.Layer
 import app.livecomposer.core.LayerType
 import app.livecomposer.engine.EngineState
@@ -193,7 +194,7 @@ fun InspectorPanel(
     onReloadWeb: () -> Unit,
     onMedia: (id: String, uri: String, loop: Boolean) -> Unit,
     onReloadMedia: (String) -> Unit,
-    onNoiseSuppression: (Boolean) -> Unit,
+    onSettings: ((AppConfig) -> Unit) -> Unit,
     onRaise: () -> Unit,
     onLower: () -> Unit,
     onDelete: () -> Unit,
@@ -215,7 +216,7 @@ fun InspectorPanel(
         }
 
         if (layer.type == LayerType.MEDIA) MediaSection(state, layer, onMedia, onReloadMedia)
-        if (layer.type.hasAudio) AudioSection(state, layer, onUpdate, onNoiseSuppression)
+        if (layer.type.hasAudio) AudioSection(state, layer, onUpdate, onSettings)
         if (layer.type == LayerType.WEB) WebSection(state, layer, onWeb, onReloadWeb)
         if (layer.type == LayerType.TEXT) TextSection(layer, onUpdate, onFitText)
 
@@ -329,10 +330,13 @@ private fun WebSection(state: EngineState, layer: Layer, onWeb: (String, Int, In
 /** 声音：音量（0~200%）与实时电平。 */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun AudioSection(state: EngineState, layer: Layer, onUpdate: (Layer) -> Unit, onNoiseSuppression: (Boolean) -> Unit) {
+private fun AudioSection(state: EngineState, layer: Layer, onUpdate: (Layer) -> Unit, onSettings: ((AppConfig) -> Unit) -> Unit) {
     Section("声音") {
         if (layer.type == LayerType.CAMERA) {
-            SwitchRow("本地降噪", "压低风扇、空调、电流声等持续底噪，人声保留", state.noiseSuppression, onNoiseSuppression)
+            SwitchRow("本地降噪", "压低风扇、空调、电流声等持续底噪，人声保留", state.noiseSuppression, { v -> onSettings { it.noiseSuppression = v } })
+        } else {
+            SwitchRow("在手机上也播放", if (state.monitorLocal) "网页和视频的声音同时从手机播放（注意麦克风可能收进去形成回声，建议戴耳机）"
+                else "关闭：声音只进推流，手机不出声（推荐）", state.monitorLocal, { v -> onSettings { it.monitorLocal = v } })
         }
         val level = state.audioLevels[layer.id] ?: 0f
         Row(verticalAlignment = Alignment.CenterVertically) {
