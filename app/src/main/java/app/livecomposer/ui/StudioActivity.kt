@@ -45,6 +45,15 @@ class StudioActivity : ComponentActivity() {
         else engine.notify("需要摄像头和麦克风权限才能采集与推流")
     }
 
+    private val videoPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri == null) return@registerForActivityResult
+        try {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (_: SecurityException) {
+        }
+        engine.addMediaLayer(uri.toString(), live = false)?.let { ui.selectedId = it.id }
+    }
+
     private val imagePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri == null) return@registerForActivityResult
         try {
@@ -112,6 +121,7 @@ class StudioActivity : ComponentActivity() {
             onLower = { id -> val i = indexOf(id); if (i > 0) engine.moveLayer(id, i - 1) },
             onDelete = { id -> ui.confirmDelete = id },
             onReloadWeb = { engine.reloadWeb() },
+            onReloadMedia = { id -> engine.reloadMedia(id) },
         )
         return StudioCallbacks(
             stage = stage,
@@ -129,6 +139,10 @@ class StudioActivity : ComponentActivity() {
             onSyncTest = { engine.setSyncTest(it) },
             onRetry = { engine.retryCapture() },
             onConsumeNotice = { engine.consumeNotice() },
+            onDeleteLayer = { id -> engine.deleteLayer(id); if (ui.selectedId == id) ui.selectedId = null },
+            onAddMedia = { uri, live -> engine.addMediaLayer(uri, live)?.id },
+            onPickVideo = { videoPicker.launch(arrayOf("video/*")) },
+            onMedia = { id, uri, loop -> engine.updateMedia(id, uri, loop) },
         )
     }
 

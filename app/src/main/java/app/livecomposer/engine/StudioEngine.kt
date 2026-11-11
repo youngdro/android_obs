@@ -28,10 +28,15 @@ import app.livecomposer.rtmp.RtmpPublisher
 import app.livecomposer.rtmp.RtmpUrl
 import app.livecomposer.rtmp.RtmpUrlException
 import app.livecomposer.source.CameraSource
+import app.livecomposer.source.PlayerSource
 import app.livecomposer.source.WebOverlaySource
 import app.livecomposer.stream.DeviceMetrics
 import app.livecomposer.stream.RunLogger
 import app.livecomposer.stream.StreamController
+import kotlin.math.abs
+
+/** 媒体图层播放状态。 */
+data class MediaStatus(val state: PlayerSource.State, val message: String?, val videoW: Int, val videoH: Int)
 
 /** 直播状态（界面用）。 */
 enum class LiveState { IDLE, CONNECTING, LIVE, RECONNECTING, FAILED }
@@ -78,6 +83,10 @@ data class EngineState(
     val availableResolutions: List<Resolution>,
     val cameraSizes: String,
     val notice: String?,
+    /** 媒体图层（拉流 / 本地视频）的播放状态，按图层 id。 */
+    val media: Map<String, MediaStatus> = emptyMap(),
+    /** 各有声图层的电平 0..1，按图层 id（摄像头图层 = 麦克风）。 */
+    val audioLevels: Map<String, Float> = emptyMap(),
 ) {
     val isStreaming: Boolean get() = live != LiveState.IDLE && live != LiveState.FAILED
 }
@@ -122,6 +131,10 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
     private var notice: String? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private val bitmapKeys = HashMap<String, String>()
+    private val players = HashMap<String, PlayerSource>()
+    private val mediaStatus = HashMap<String, MediaStatus>()
+    /** 新加的媒体图层：拿到画面尺寸后把图层框调成画面比例。 */
+    private val autoSize = HashSet<String>()
 
     private var cachedResolutions: List<Resolution>? = null
 
@@ -159,10 +172,22 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
             availableResolutions = availableResolutions(),
             cameraSizes = if (ready) camera.outputSizes.take(6).joinToString { "${it.width}×${it.height}" } else "",
             notice = notice,
+            media = HashMap(mediaStatus),
+            audioLevels = audioLevels(),
         )
     }
 
     private var lastFailed = false
+
+    private fun audioLevels(): Map<String, Float> {
+        val m = HashMap<String, Float>()
+        for (l in config.layers) when (l.type) {
+            LayerType.CAMERA -> m[l.id] = if (config.micMuted) 0f else micLevel
+            LayerType.MEDIA -> if (ready) m[l.id] = audio.mixer.level(l.id)
+            else -> {}
+        }
+        return m
+    }
 
     private fun changed() { onChanged?.invoke() }
 
@@ -195,6 +220,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
             onError = { msg -> main.post { micMessage = msg; changed() } },
         )
         audio.muted = config.micMuted
+        audio.micVolume = cameraLayer()?.volume ?: 1f
         stream = StreamController(compositor, audio, object : StreamController.Listener {
             override fun onStats(stats: StreamController.Stats) {
                 this@StudioEngine.stats = stats
@@ -214,6 +240,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         compositor.start { st -> main.post { cameraTexture = st; if (started) openCamera() } }
         if (previewSurface != null) compositor.setPreviewSurface(previewSurface, pw, ph)
         setupWebLayer()
+        config.layers.filter { it.type == LayerType.MEDIA }.forEach { setupMedia(it) }
         pushScene()
         registerNetworkCallback()
         main.post(perfTick)
@@ -226,6 +253,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         openCamera()
         micMessage = null
         audio.startCapture()
+        players.values.forEach { it.resume() }
         changed()
     }
 
@@ -237,6 +265,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         if (stream.isActive) { stream.stop("应用进入后台，推流已自动停止"); stopped = true }
         camera.close()
         audio.stopCapture()
+        players.values.forEach { it.pause() }
         config.save(activity)
         return stopped
     }
@@ -249,6 +278,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         }
         stream.stop()
         web?.release()
+        players.values.forEach { it.release() }; players.clear()
         camera.release()
         audio.stopCapture()
         compositor.release()
@@ -260,7 +290,14 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
     }
 
     /** 屏幕方向变化后（Activity 不重建）重新计算摄像头旋转。 */
-    fun onDisplayRotationChanged() { if (ready && started) openCamera() }
+    fun onDisplayRotationChanged() { if (ready && started) scheduleOpenCamera() }
+
+    /** 合并短时间内的多次重开（切换画布方向时：设置变更 + 屏幕旋转会各触发一次）。 */
+    private val openCameraRunnable = Runnable { if (ready && started) openCamera() }
+    private fun scheduleOpenCamera() {
+        main.removeCallbacks(openCameraRunnable)
+        main.postDelayed(openCameraRunnable, 250)
+    }
 
     // ------------------------------------------------------------------ 摄像头
 
@@ -308,6 +345,84 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
 
     fun webLayer(): Layer? = config.layers.firstOrNull { it.type == LayerType.WEB }
 
+    fun cameraLayer(): Layer? = config.layers.firstOrNull { it.type == LayerType.CAMERA }
+
+    // ------------------------------------------------------------------ 媒体图层（拉流 / 本地视频）
+
+    private fun setupMedia(l: Layer) {
+        players.remove(l.id)?.release()
+        compositor.releaseExternalSurface(l.id)
+        mediaStatus.remove(l.id)
+        if (l.mediaUri.isBlank()) { pushScene(); return }
+        val src = PlayerSource(activity, l.id, l.mediaUri, l.mediaLive, l.loop, audio.mixer, l.volume,
+            object : PlayerSource.Listener {
+                override fun onStateChanged(state: PlayerSource.State, message: String?) {
+                    if (players[l.id] == null) return
+                    val old = mediaStatus[l.id]
+                    mediaStatus[l.id] = MediaStatus(state, message, old?.videoW ?: 0, old?.videoH ?: 0)
+                    pushScene(); changed()
+                }
+
+                override fun onVideoSize(width: Int, height: Int) {
+                    val cur = config.layers.firstOrNull { it.id == l.id } ?: return
+                    val old = mediaStatus[l.id]
+                    mediaStatus[l.id] = MediaStatus(old?.state ?: PlayerSource.State.PLAYING, old?.message, width, height)
+                    if (autoSize.remove(l.id)) {
+                        // 保持中心，图层框改成画面比例并放进原来的框里
+                        val a = width.toFloat() / height
+                        val cx = cur.x + cur.w / 2; val cy = cur.y + cur.h / 2
+                        var w = cur.w; var h = w / a
+                        if (h > cur.h) { h = cur.h; w = h * a }
+                        cur.w = w; cur.h = h; cur.x = cx - w / 2; cur.y = cy - h / 2
+                        config.save(activity)
+                    }
+                    pushScene(); changed()
+                }
+            })
+        players[l.id] = src
+        mediaStatus[l.id] = MediaStatus(PlayerSource.State.CONNECTING, null, 0, 0)
+        compositor.createExternalSurface(l.id, 1280, 720) { surface ->
+            main.post { if (players[l.id] === src) { src.attach(surface); if (!started) src.pause() } }
+        }
+    }
+
+    /** 添加媒体图层。live=true 为拉流地址，false 为本地视频（content:// URI）。 */
+    fun addMediaLayer(uri: String, live: Boolean): Layer? {
+        val u = uri.trim()
+        if (u.isEmpty()) { notify("请输入拉流地址"); return null }
+        if (live && !SUPPORTED_PULL.any { u.startsWith(it, ignoreCase = true) }) {
+            notify("拉流地址需以 http(s)://、rtmp://、rtsp:// 开头"); return null
+        }
+        if (config.layers.count { it.type == LayerType.MEDIA } >= MAX_MEDIA) { notify("最多同时添加 $MAX_MEDIA 路媒体（受手机解码器数量限制）"); return null }
+        val n = config.layers.count { it.type == LayerType.MEDIA } + 1
+        val cw = config.canvasWidth.toFloat(); val ch = config.canvasHeight.toFloat()
+        var w = cw / 2; var h = w * 9 / 16
+        if (h > ch / 2) { h = ch / 2; w = h * 16 / 9 }
+        val l = Layer(type = LayerType.MEDIA, name = if (live) "拉流 $n" else "视频 $n",
+            x = (cw - w) / 2, y = (ch - h) / 2, w = w, h = h, mediaUri = u, mediaLive = live)
+        config.layers.add(l)
+        autoSize.add(l.id)
+        config.save(activity)
+        if (ready) setupMedia(l)
+        pushScene(); changed()
+        return l
+    }
+
+    /** 修改媒体图层的地址 / 循环设置，并重新开始播放。 */
+    fun updateMedia(id: String, uri: String, loop: Boolean) {
+        val l = config.layers.firstOrNull { it.id == id && it.type == LayerType.MEDIA } ?: return
+        l.mediaUri = uri.trim(); l.loop = loop
+        config.save(activity)
+        if (ready) setupMedia(l)
+        changed()
+    }
+
+    fun reloadMedia(id: String) {
+        val l = config.layers.firstOrNull { it.id == id && it.type == LayerType.MEDIA } ?: return
+        if (ready) setupMedia(l)
+        changed()
+    }
+
     private fun setupWebLayer() {
         web?.release(); web = null
         webOutputVisible = false
@@ -352,6 +467,14 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         l.name = updated.name; l.x = updated.x; l.y = updated.y; l.w = updated.w; l.h = updated.h
         l.visible = updated.visible; l.locked = updated.locked; l.opacity = updated.opacity
         l.text = updated.text; l.textSizePx = updated.textSizePx; l.textColor = updated.textColor
+        if (l.volume != updated.volume) {
+            l.volume = updated.volume.coerceIn(0f, 2f)
+            if (ready) when (l.type) {
+                LayerType.CAMERA -> audio.micVolume = l.volume
+                LayerType.MEDIA -> players[l.id]?.setVolume(l.volume)
+                else -> {}
+            }
+        }
         pushScene()
         if (persist) config.save(activity)
         changed()
@@ -367,8 +490,12 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
 
     fun deleteLayer(id: String) {
         val l = config.layers.firstOrNull { it.id == id } ?: return
+        if (l.type == LayerType.CAMERA) { notify("摄像头图层不能删除，可以隐藏或缩小"); return }
         config.layers.remove(l)
-        if (l.type == LayerType.WEB) {
+        if (l.type == LayerType.MEDIA) {
+            players.remove(l.id)?.release(); mediaStatus.remove(l.id); autoSize.remove(l.id)
+            if (ready) compositor.releaseExternalSurface(l.id)
+        } else if (l.type == LayerType.WEB) {
             web?.release(); web = null; webOutputVisible = false
             webState = WebOverlaySource.LoadState.IDLE; webMessage = null; webViewport = null
             if (ready) compositor.releaseExternalSurface(l.id)
@@ -431,6 +558,17 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         for (l in config.layers) {
             if (!l.visible) continue
             when (l.type) {
+                LayerType.CAMERA -> list.add(Compositor.RenderLayer(l.id, Compositor.RenderLayer.Kind.CAMERA, l.x, l.y, l.w, l.h, l.opacity))
+                LayerType.MEDIA -> {
+                    val st = mediaStatus[l.id] ?: continue
+                    if (st.videoW <= 0 || st.state == PlayerSource.State.ERROR) continue
+                    // 画面等比放进图层框（留边透明）
+                    val a = st.videoW.toFloat() / st.videoH
+                    var w = l.w; var h = w / a
+                    if (h > l.h) { h = l.h; w = h * a }
+                    list.add(Compositor.RenderLayer(l.id, Compositor.RenderLayer.Kind.EXTERNAL,
+                        l.x + (l.w - w) / 2, l.y + (l.h - h) / 2, w, h, l.opacity))
+                }
                 LayerType.WEB -> if (webOutputVisible) list.add(Compositor.RenderLayer(l.id, Compositor.RenderLayer.Kind.EXTERNAL, l.x, l.y, l.w, l.h, l.opacity))
                 LayerType.IMAGE, LayerType.TEXT -> if (ensureBitmap(l)) list.add(Compositor.RenderLayer(l.id, Compositor.RenderLayer.Kind.BITMAP, l.x, l.y, l.w, l.h, l.opacity))
             }
@@ -535,29 +673,54 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         val oldW = config.canvasWidth; val oldH = config.canvasHeight
         val oldFps = config.fps; val oldGpu = config.webCaptureGpu; val oldHttp = config.allowCleartextWeb
         val oldRot = config.cameraRotationFix; val oldRes = config.resolution
+        val oldOrientation = config.orientation
         edit(config)
         val newW = config.canvasWidth; val newH = config.canvasHeight
-        if (oldW != newW || oldH != newH) {
-            for (l in config.layers) {
-                val full = l.x == 0f && l.y == 0f && l.w == oldW.toFloat() && l.h == oldH.toFloat()
-                if (full) {
-                    l.w = newW.toFloat(); l.h = newH.toFloat()
-                    if (l.type == LayerType.WEB) { l.viewportW = newW; l.viewportH = newH }
-                } else {
-                    // 保持中心点的相对位置与尺寸，限制在画布内
-                    val s = minOf(newW.toFloat() / oldW, newH.toFloat() / oldH)
-                    val cx = (l.x + l.w / 2) / oldW * newW; val cy = (l.y + l.h / 2) / oldH * newH
-                    l.w *= s; l.h *= s; l.x = cx - l.w / 2; l.y = cy - l.h / 2
-                }
-            }
-        }
+        if (oldW != newW || oldH != newH) relayout(oldOrientation, oldW, oldH)
         config.save(activity)
         if (!ready) { changed(); return }
         if (oldW != newW || oldH != newH || oldFps != config.fps) compositor.configure(newW, newH, config.fps)
         if (oldW != newW || oldH != newH || oldGpu != config.webCaptureGpu || oldHttp != config.allowCleartextWeb || oldFps != config.fps) setupWebLayer()
-        if (oldRes != config.resolution || oldRot != config.cameraRotationFix || oldW != newW) openCamera()
+        if (oldRes != config.resolution || oldRot != config.cameraRotationFix || oldW != newW) scheduleOpenCamera()
         pushScene()
         changed()
+    }
+
+    /**
+     * 画布尺寸变化后重新摆放图层。
+     * 横屏和竖屏各记一份布局（按画布比例归一化保存在图层里）：切回去时原样恢复，
+     * 不会因为每次换算都缩小一点而越切越小。第一次切到某个方向时：铺满画布的图层继续铺满，
+     * 其他图层保持中心的相对位置，等比缩放到能放进新画布。
+     */
+    private fun relayout(oldOrientation: CanvasOrientation, oldW: Int, oldH: Int) {
+        val newW = config.canvasWidth.toFloat(); val newH = config.canvasHeight.toFloat()
+        val newKey = config.orientation.name
+        for (l in config.layers) {
+            // 记下旧方向的布局
+            l.layouts[oldOrientation.name] = floatArrayOf(l.x / oldW, l.y / oldH, l.w / oldW, l.h / oldH)
+            val saved = l.layouts[newKey]
+            val full = abs(l.x) < 1f && abs(l.y) < 1f && abs(l.w - oldW) < 1f && abs(l.h - oldH) < 1f
+            when {
+                saved != null && oldOrientation != config.orientation -> {
+                    l.x = saved[0] * newW; l.y = saved[1] * newH; l.w = saved[2] * newW; l.h = saved[3] * newH
+                }
+                full -> { l.x = 0f; l.y = 0f; l.w = newW; l.h = newH }
+                oldOrientation == config.orientation -> {
+                    // 只换分辨率：整体等比缩放（可逆）
+                    val k = newW / oldW
+                    l.x *= k; l.y *= k; l.w *= k; l.h *= k
+                }
+                else -> {
+                    val s = minOf(1f, newW / l.w, newH / l.h)
+                    val cx = (l.x + l.w / 2) / oldW * newW; val cy = (l.y + l.h / 2) / oldH * newH
+                    l.w *= s; l.h *= s
+                    l.x = (cx - l.w / 2).coerceIn(0f, newW - l.w); l.y = (cy - l.h / 2).coerceIn(0f, newH - l.h)
+                }
+            }
+            if (l.type == LayerType.WEB && abs(l.w - newW) < 1f && abs(l.h - newH) < 1f) {
+                l.viewportW = newW.toInt(); l.viewportH = newH.toInt()
+            }
+        }
     }
 
     fun setSyncTest(on: Boolean) {
@@ -599,5 +762,11 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
         runLogger.append(listOf(st.durationSec, st.state.name, "%.1f".format(st.outputFps), "%.0f".format(st.bitrateKbps),
             st.droppedFrames, st.renderLate, st.reconnects, "%.1f".format(web?.lastCaptureMs ?: 0.0), webFps,
             m?.pssMb ?: 0, m?.javaMb ?: 0, m?.batteryTempC ?: 0f, m?.thermal ?: ""))
+    }
+
+    companion object {
+        /** 同时解码的视频路数上限（加上摄像头和编码器，多数手机硬件编解码实例在 4~8 个之间）。 */
+        const val MAX_MEDIA = 3
+        private val SUPPORTED_PULL = listOf("http://", "https://", "rtmp://", "rtsp://")
     }
 }

@@ -29,7 +29,8 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
         val x: Float, val y: Float, val w: Float, val h: Float,
         val opacity: Float = 1f,
     ) {
-        enum class Kind { EXTERNAL, BITMAP }
+        /** CAMERA：摄像头画面，等比铺满图层框（超出部分裁掉）；EXTERNAL：网页 / 视频；BITMAP：图片 / 文字。 */
+        enum class Kind { CAMERA, EXTERNAL, BITMAP }
     }
 
     @Volatile var canvasWidth = canvasWidth; private set
@@ -66,6 +67,8 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
     private val bitmaps = HashMap<String, BitmapTex>()
 
     @Volatile private var scene: List<RenderLayer> = emptyList()
+    /** 摄像头图层在画布中的框（用于点击对焦坐标换算）；null 表示摄像头图层不可见。 */
+    @Volatile private var cameraRect: FloatArray? = null
 
     /**
      * 音画同步测试信号：画面左上角 1/8 区域平时为黑块，每到整秒（MONOTONIC 时钟）的第一帧变白；
@@ -153,7 +156,10 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
         cameraSt?.setDefaultBufferSize(bufferW, bufferH)
     }
 
-    fun setScene(layers: List<RenderLayer>) { scene = layers }
+    fun setScene(layers: List<RenderLayer>) {
+        cameraRect = layers.firstOrNull { it.kind == RenderLayer.Kind.CAMERA }?.let { floatArrayOf(it.x, it.y, it.w, it.h) }
+        scene = layers
+    }
 
     /** 为网页图层创建一个可被 Canvas 绘制的 Surface（内容带 Alpha）。 */
     fun createExternalSurface(id: String, width: Int, height: Int, cb: (Surface) -> Unit) = handler.post {
@@ -218,14 +224,17 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
 
     /** 画布坐标（像素）→ 摄像头自然方向图像的归一化坐标 (u 向右, v 向下)，用于点击对焦。 */
     fun canvasToCameraUv(px: Float, py: Float): Pair<Float, Float>? {
+        val r = cameraRect ?: return null
+        val (rx, ry, rw, rh) = listOf(r[0], r[1], r[2], r[3])
+        if (px < rx || px > rx + rw || py < ry || py > ry + rh) return null
         val (nw, nh) = naturalCameraSize()
         val a = Math.toRadians(cameraRotationDeg.toDouble())
         val rotW = if (cameraRotationDeg % 180 == 0) nw else nh
         val rotH = if (cameraRotationDeg % 180 == 0) nh else nw
-        val s = max(canvasWidth / rotW, canvasHeight / rotH)
-        // 画布像素 → 以中心为原点、y 向上
-        val cx = (px - canvasWidth / 2f) / s
-        val cy = (canvasHeight / 2f - py) / s
+        val s = max(rw / rotW, rh / rotH)
+        // 画布像素 → 以摄像头图层中心为原点、y 向上
+        val cx = (px - (rx + rw / 2f)) / s
+        val cy = ((ry + rh / 2f) - py) / s
         // 逆旋转
         val ix = (cx * cos(-a) - cy * sin(-a)).toFloat()
         val iy = (cx * sin(-a) + cy * cos(-a)).toFloat()
@@ -322,13 +331,26 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
         GLES20.glDisable(GLES20.GL_BLEND)
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-        if (cameraHasFrame) oes.draw(cameraTex, cameraMatrix, cameraCorners(), 1f)
 
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA) // 预乘 Alpha 混合
         for (l in scene) {
+            if (l.w < 1f || l.h < 1f) continue
             val corners = rectCorners(l.x, l.y, l.w, l.h)
             when (l.kind) {
+                RenderLayer.Kind.CAMERA -> {
+                    if (!cameraHasFrame) continue
+                    // 等比铺满图层框，用裁剪测试切掉框外部分
+                    val sx = l.x.toInt().coerceAtLeast(0)
+                    val sy = (canvasHeight - (l.y + l.h)).toInt().coerceAtLeast(0)
+                    val sw = (l.x + l.w).toInt().coerceAtMost(canvasWidth) - sx
+                    val sh = (canvasHeight - l.y).toInt().coerceAtMost(canvasHeight) - sy
+                    if (sw <= 0 || sh <= 0) continue
+                    GLES20.glEnable(GLES20.GL_SCISSOR_TEST)
+                    GLES20.glScissor(sx, sy, sw, sh)
+                    oes.draw(cameraTex, cameraMatrix, cameraCorners(l.x, l.y, l.w, l.h), l.opacity)
+                    GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
+                }
                 RenderLayer.Kind.EXTERNAL -> {
                     val e = externals[l.id] ?: continue
                     if (e.hasFrame) oes.draw(e.tex, e.matrix, corners, l.opacity)
@@ -369,21 +391,23 @@ class Compositor(canvasWidth: Int, canvasHeight: Int, fps: Int) {
         }
     }
 
-    /** 摄像头画面：按自然方向旋转 cameraRotationDeg（逆时针），再等比铺满画布（居中裁切）。 */
-    private fun cameraCorners(): FloatArray {
+    /** 摄像头画面：按自然方向旋转 cameraRotationDeg（逆时针），再等比铺满图层框（居中裁切）。 */
+    private fun cameraCorners(x: Float, y: Float, w: Float, h: Float): FloatArray {
         val (nw, nh) = naturalCameraSize()
         val a = Math.toRadians(cameraRotationDeg.toDouble())
         val rotW = if (cameraRotationDeg % 180 == 0) nw else nh
         val rotH = if (cameraRotationDeg % 180 == 0) nh else nw
-        val s = max(canvasWidth / rotW, canvasHeight / rotH)
+        val s = max(w / rotW, h / rotH)
+        val ncx = (x + w / 2) / canvasWidth * 2 - 1
+        val ncy = 1 - (y + h / 2) / canvasHeight * 2
         val out = FloatArray(8)
         val pts = floatArrayOf(-nw / 2, -nh / 2, nw / 2, -nh / 2, -nw / 2, nh / 2, nw / 2, nh / 2)
         for (i in 0 until 4) {
             val x = pts[i * 2]; val y = pts[i * 2 + 1]
             val rx = (x * cos(a) - y * sin(a)) * s
             val ry = (x * sin(a) + y * cos(a)) * s
-            out[i * 2] = (rx * 2 / canvasWidth).toFloat()
-            out[i * 2 + 1] = (ry * 2 / canvasHeight).toFloat()
+            out[i * 2] = (ncx + rx * 2 / canvasWidth).toFloat()
+            out[i * 2 + 1] = (ncy + ry * 2 / canvasHeight).toFloat()
         }
         return out
     }
