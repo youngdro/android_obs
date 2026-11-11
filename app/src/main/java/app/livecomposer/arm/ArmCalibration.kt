@@ -46,7 +46,26 @@ data class GripperCal(val servoId: Int, val closedTick: Int, val openTick: Int) 
 data class ArmCalibration(val joints: List<JointCal>, val gripper: GripperCal?) {
     val servoIds: List<Int> get() = joints.map { it.servoId } + listOfNotNull(gripper?.servoId)
 
+    fun toJson(): org.json.JSONObject = org.json.JSONObject().apply {
+        put("format", "livecomposer-arm-calibration"); put("version", 1)
+        put("joints", org.json.JSONArray().apply {
+            for (j in joints) put(org.json.JSONObject().put("name", j.name).put("servoId", j.servoId).put("zeroTick", j.zeroTick)
+                .put("sign", j.sign).put("minTick", j.minTick).put("maxTick", j.maxTick))
+        })
+        gripper?.let { put("gripper", org.json.JSONObject().put("servoId", it.servoId).put("closedTick", it.closedTick).put("openTick", it.openTick)) }
+    }
+
     companion object {
+        fun fromJson(o: org.json.JSONObject): ArmCalibration {
+            val arr = o.getJSONArray("joints")
+            val joints = (0 until arr.length()).map { i ->
+                val j = arr.getJSONObject(i)
+                JointCal(j.getString("name"), j.getInt("servoId"), j.getInt("zeroTick"), j.getInt("sign"), j.getInt("minTick"), j.getInt("maxTick"))
+            }
+            val g = o.optJSONObject("gripper")?.let { GripperCal(it.getInt("servoId"), it.getInt("closedTick"), it.getInt("openTick")) }
+            return ArmCalibration(joints, g)
+        }
+
         /**
          * 2026-11-11 对 a003 act 机械臂（6 关节 + 夹爪，ST3215）的实测标定。
          *
