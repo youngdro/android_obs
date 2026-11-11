@@ -112,6 +112,11 @@ data class AppConfig(
     var powerSave: Boolean = true,
     /** 网页 / 视频的声音是否也在手机上播放（默认否：只进推流）。 */
     var monitorLocal: Boolean = false,
+    /** 第二路推流（纯摄像头画面）：地址（加密保存）、是否带麦克风声音、分辨率、码率。 */
+    var camUrl: String = "",
+    var camAudio: Boolean = true,
+    var camResolution: Resolution = Resolution.P720,
+    var camBitrateKbps: Int = 2500,
     /** 网页采集帧率，0 = 跟随输出帧率。 */
     var webCaptureFps: Int = 0,
     val layers: MutableList<Layer> = mutableListOf(),
@@ -144,6 +149,9 @@ data class AppConfig(
                 c.noiseSuppression = o.optBoolean("noiseSuppression", true)
                 c.powerSave = o.optBoolean("powerSave", true)
                 c.monitorLocal = o.optBoolean("monitorLocal", false)
+                c.camAudio = o.optBoolean("camAudio", true)
+                c.camResolution = runCatching { Resolution.valueOf(o.optString("camResolution")) }.getOrDefault(Resolution.P720)
+                c.camBitrateKbps = o.optInt("camBitrateKbps", 2500)
                 c.webCaptureFps = o.optInt("webCaptureFps", 0)
                 val arr = o.optJSONArray("layers") ?: JSONArray()
                 for (i in 0 until arr.length()) c.layers.add(Layer.fromJson(arr.getJSONObject(i)))
@@ -151,6 +159,7 @@ data class AppConfig(
             }
             // 完整 URL 中也包含密钥，同样加密保存
             c.fullUrl = decrypt(p.getString("fullUrlEnc", null)) ?: ""
+            c.camUrl = decrypt(p.getString("camUrlEnc", null)) ?: ""
             c.streamKey = decrypt(p.getString("streamKeyEnc", null)) ?: ""
             return c.withDefaults(firstRun = false)
         }
@@ -210,12 +219,14 @@ data class AppConfig(
             put("useFullUrl", useFullUrl); put("serverUrl", serverUrl); put("zoom", zoom.toDouble())
             put("micMuted", micMuted); put("allowCleartextWeb", allowCleartextWeb); put("webCaptureGpu", webCaptureGpu)
             put("cameraRotationFix", cameraRotationFix); put("noiseSuppression", noiseSuppression)
-            put("powerSave", powerSave); put("monitorLocal", monitorLocal); put("webCaptureFps", webCaptureFps)
+            put("powerSave", powerSave); put("monitorLocal", monitorLocal);
+            put("camAudio", camAudio); put("camResolution", camResolution.name); put("camBitrateKbps", camBitrateKbps); put("webCaptureFps", webCaptureFps)
             put("layers", JSONArray().apply { layers.forEach { put(it.toJson()) } })
         }
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString("json", o.toString())
             .putString("fullUrlEnc", try { encrypt(fullUrl) } catch (_: Exception) { "" })
+            .putString("camUrlEnc", try { encrypt(camUrl) } catch (_: Exception) { "" })
             .putString("streamKeyEnc", try { encrypt(streamKey) } catch (_: Exception) { "" })
             .apply()
     }

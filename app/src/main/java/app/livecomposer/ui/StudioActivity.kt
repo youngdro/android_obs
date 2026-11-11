@@ -91,7 +91,7 @@ class StudioActivity : ComponentActivity() {
         engine.onChanged = {
             val s = engine.snapshot()
             state.value = s
-            if (dimmed && !s.isStreaming) { undim(); scheduleDim() } // 停播后恢复亮度
+            if (dimmed && !s.isStreaming && !s.cam.active) { undim(); scheduleDim() } // 停播后恢复亮度
         }
         state.value = engine.snapshot()
         applyOrientation()
@@ -167,6 +167,12 @@ class StudioActivity : ComponentActivity() {
                 onDelete = { id -> engine.deleteScene(id) },
                 onMove = { id, d -> engine.moveScene(id, d) },
             ),
+            camStream = CamStreamActions(
+                onEdit = { edit -> engine.updateCamStream(edit) },
+                onStart = { engine.startCamStream() },
+                onStop = { engine.stopCamStream() },
+                validate = { engine.validateCamUrl() },
+            ),
         )
     }
 
@@ -205,7 +211,7 @@ class StudioActivity : ComponentActivity() {
 
     private fun maybeDim() {
         val s = state.value
-        if (initialized && started && engine.config.powerSave && s != null && s.isStreaming && !dimmed) {
+        if (initialized && started && engine.config.powerSave && s != null && (s.isStreaming || s.cam.active) && !dimmed) {
             dimmed = true
             window.attributes = window.attributes.apply { screenBrightness = 0.02f }
             engine.notify("已调暗屏幕省电，直播不受影响；触摸屏幕恢复")
