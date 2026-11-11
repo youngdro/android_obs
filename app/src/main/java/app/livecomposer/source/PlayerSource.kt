@@ -32,7 +32,8 @@ import java.nio.ByteBuffer
  * - 画面：解码器直接输出到合成器提供的 Surface（SurfaceTexture → OES 纹理），和网页图层走同一条路。
  * - 声音：音频渲染链里插一个 TeeAudioProcessor，把解码后的 PCM 交给 [AudioMixer] 混进推流；
  *   本机扬声器输出音量设为 0，避免外放又被麦克风收进去形成回声。
- * - 拉流断线 / 出错按 1、2、5、10 秒递增自动重连；本地文件按设置循环播放。
+ * - 拉流断线 / 出错按 1、2、5、10 秒递增自动重连；网络视频（http(s) 点播）网络出错同样重连，并从断点继续播放。
+ * - 视频文件（本地或网络）可设置循环或不循环，播放中可随时切换。
  *
  * 所有方法在主线程调用。
  */
@@ -42,7 +43,7 @@ class PlayerSource(
     val id: String,
     private val uri: String,
     private val live: Boolean,
-    private val loop: Boolean,
+    private var loop: Boolean,
     private val mixer: AudioMixer,
     volume: Float,
     private val listener: Listener,
@@ -64,6 +65,9 @@ class PlayerSource(
     private var released = false
     private var everPlayed = false
     private var retry = 0
+    /** 网络视频重连时从这里继续（毫秒）。 */
+    private var resumeAt = 0L
+    private val remote = !live && (uri.startsWith("http://", true) || uri.startsWith("https://", true))
     var state = State.IDLE; private set
     var message: String? = null; private set
 
@@ -78,6 +82,15 @@ class PlayerSource(
     fun setVolume(v: Float) = mixer.setVolume(id, v)
 
     fun pause() { player?.pause() }
+
+    /** 切换循环 / 不循环（只对视频文件有效）。已播完时打开循环会从头重新播放。 */
+    fun setLoop(value: Boolean) {
+        if (live) return
+        loop = value
+        val p = player ?: return
+        p.repeatMode = if (value) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+        if (value && p.playbackState == Player.STATE_ENDED) { p.seekTo(0); p.play() }
+    }
 
     fun resume() {
         val p = player ?: return
@@ -98,6 +111,7 @@ class PlayerSource(
     }
 
     private fun start() {
+        player?.let { old -> if (remote && everPlayed) resumeAt = old.currentPosition }
         player?.release()
         val p = build()
         player = p
@@ -119,7 +133,7 @@ class PlayerSource(
                 if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
                     p.seekToDefaultPosition(); p.prepare(); return
                 }
-                if (live && error.errorCode !in FATAL) scheduleReconnect(msg) else setState(State.ERROR, msg)
+                if ((live || remote) && error.errorCode !in FATAL) scheduleReconnect(msg) else setState(State.ERROR, msg)
             }
 
             override fun onVideoSizeChanged(videoSize: VideoSize) {
@@ -128,7 +142,8 @@ class PlayerSource(
             }
         })
         setState(State.CONNECTING)
-        p.setMediaItem(MediaItem.fromUri(Uri.parse(uri)))
+        if (resumeAt > 0) p.setMediaItem(MediaItem.fromUri(Uri.parse(uri)), resumeAt)
+        else p.setMediaItem(MediaItem.fromUri(Uri.parse(uri)))
         p.playWhenReady = true
         p.prepare()
     }
