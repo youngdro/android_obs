@@ -19,6 +19,7 @@ sourceSets {
         kotlin.exclude("app/livecomposer/ui/**")
         // 媒体播放用 Media3（AndroidX），同理由 CI 编译；这里用公开 API 相同的替身
         kotlin.exclude("app/livecomposer/source/PlayerSource.kt")
+        kotlin.exclude("app/livecomposer/source/WebCompat.kt")
         kotlin.srcDir("src/stubs/kotlin")
     }
 }

@@ -348,8 +348,11 @@ private fun AudioSection(state: EngineState, layer: Layer, onUpdate: (Layer) -> 
             }
         }
         Text(
-            if (layer.type == LayerType.CAMERA) "摄像头图层的声音来自麦克风；工具栏的麦克风按钮是一键静音。"
-            else "声音只混进直播，不从手机扬声器外放（避免被麦克风再次收音形成回声）。",
+            when (layer.type) {
+                LayerType.CAMERA -> "摄像头图层的声音来自麦克风；工具栏的麦克风按钮是一键静音。"
+                LayerType.WEB -> "网页里的音频、视频和 Web Audio 声音只混进直播，不外放。跨域且服务器没开 CORS 的音频文件采不到。隐藏图层时不出声。"
+                else -> "声音只混进直播，不从手机扬声器外放（避免被麦克风再次收音形成回声）。隐藏图层时不出声。"
+            },
             style = MaterialTheme.typography.bodySmall,
         )
     }

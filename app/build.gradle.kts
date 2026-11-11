@@ -12,8 +12,8 @@ android {
         applicationId = "app.livecomposer"
         minSdk = 29          // Android 10 及以上
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.4.0"
+        versionCode = 5
+        versionName = "0.5.0"
     }
 
     buildTypes {
@@ -53,4 +53,6 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-hls:$media3")
     implementation("androidx.media3:media3-exoplayer-rtsp:$media3")
     implementation("androidx.media3:media3-datasource-rtmp:$media3")
+    // 网页音频桥：在页面脚本之前注入（DOCUMENT_START_SCRIPT）
+    implementation("androidx.webkit:webkit:1.12.1")
 }
