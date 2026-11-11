@@ -43,6 +43,19 @@ object ArmKinematics {
         return Pose(r, p)
     }
 
+    /** 各关节原点在底座坐标系里的位置（含底座原点，共 7 个点），画骨架用。 */
+    fun chain(q: DoubleArray): List<DoubleArray> {
+        var r = doubleArrayOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+        var p = doubleArrayOf(0.0, 0.0, 0.0)
+        val out = arrayListOf(p)
+        for (i in 0 until 6) {
+            p = add(p, mulV(r, origins[i]))
+            r = mulM(r, rot(axes[i], q[i]))
+            out += p
+        }
+        return out
+    }
+
     private fun rot(a: DoubleArray, th: Double): DoubleArray {
         val c = cos(th); val s = sin(th); val t = 1 - c
         val (x, y, z) = Triple(a[0], a[1], a[2])
