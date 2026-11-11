@@ -13,10 +13,12 @@ import kotlin.math.sqrt
  * - 消费者：麦克风采集线程每读到一块就调用 [mixInto]，按各源音量叠加并限幅。
  *   麦克风是主时钟，所以媒体源与麦克风之间的时钟漂移靠缓冲水位控制：
  *   积压超过 [MAX_LATENCY_MS] 就丢掉最旧的数据，追回到 [TARGET_LATENCY_MS]；欠载则补静音并重新预充。
+ * - 自适应缓冲：数据一阵一阵到达的源（例如网页声音，网页忙时会成批晚到）在“还在出声时”欠载，
+ *   就把该源的缓冲目标加 [STEP_MS]（最多 [ADAPT_MAX_MS]），之后 [RELAX_MS] 内不再欠载才逐步回落。
  *
  * 纯 Kotlin，无 Android 依赖，可在 JVM 上测试（verify/）。
  */
-class AudioMixer(val sampleRate: Int, val channels: Int) {
+class AudioMixer(val sampleRate: Int, val channels: Int, private val now: () -> Long = System::nanoTime) {
 
     private inner class Source {
         val cap = sampleRate * channels * 2 // 2 秒
@@ -26,6 +28,10 @@ class AudioMixer(val sampleRate: Int, val channels: Int) {
         @Volatile var volume = 1f
         @Volatile var level = 0f
         var primed = false
+        /** 该源当前的缓冲目标（毫秒），按欠载情况自适应。 */
+        var targetMs = TARGET_LATENCY_MS
+        var lastWriteNs = 0L
+        var lastUnderrunNs = 0L
         // 输入格式
         var inRate = 0
         var inChannels = 0
@@ -55,6 +61,9 @@ class AudioMixer(val sampleRate: Int, val channels: Int) {
 
     fun setVolume(id: String, volume: Float) { sources[id]?.volume = volume.coerceIn(0f, 2f) }
 
+    /** 该源当前的缓冲目标（毫秒），诊断用。 */
+    fun targetMs(id: String): Int = sources[id]?.targetMs ?: 0
+
     /** 0..1 的电平（已乘音量），界面显示用。 */
     fun level(id: String): Float = sources[id]?.level ?: 0f
 
@@ -77,6 +86,7 @@ class AudioMixer(val sampleRate: Int, val channels: Int) {
                 ENCODING_PCM_FLOAT -> 4
                 else -> return
             }
+            s.lastWriteNs = now()
             val buf = data.duplicate().order(ByteOrder.LITTLE_ENDIAN)
             val frameBytes = bytesPerSample * s.inChannels
             val step = s.inRate.toDouble() / sampleRate
@@ -120,10 +130,15 @@ class AudioMixer(val sampleRate: Int, val channels: Int) {
         val n = frames * channels
         val acc = IntArray(n) { out[it].toInt() }
         var any = false
-        val maxBacklog = sampleRate * channels * MAX_LATENCY_MS / 1000
-        val target = sampleRate * channels * TARGET_LATENCY_MS / 1000
+        val t = now()
         for (s in sources.values) {
             synchronized(s) {
+                // 长时间没有欠载：缓冲目标逐步回落，减少延迟
+                if (s.targetMs > TARGET_LATENCY_MS && t - s.lastUnderrunNs > RELAX_MS * 1_000_000L) {
+                    s.targetMs = maxOf(TARGET_LATENCY_MS, s.targetMs - STEP_MS / 2); s.lastUnderrunNs = t
+                }
+                val target = sampleRate * channels * s.targetMs / 1000
+                val maxBacklog = sampleRate * channels * (s.targetMs + MAX_LATENCY_MS - TARGET_LATENCY_MS) / 1000
                 if (s.size > maxBacklog) {
                     val drop = s.size - target
                     s.readPos = (s.readPos + drop) % s.cap; s.size -= drop
@@ -137,7 +152,13 @@ class AudioMixer(val sampleRate: Int, val channels: Int) {
                     acc[i] += (s.ring[(s.readPos + i) % s.cap] * vol).toInt()
                 }
                 s.readPos = (s.readPos + take) % s.cap; s.size -= take
-                if (take < n) s.primed = false // 欠载：本块补静音，下次重新预充
+                if (take < n) {
+                    s.primed = false // 欠载：本块补静音，下次重新预充
+                    // 源还在持续送数据（不是声音停了）却欠载：说明到达抖动比缓冲大，加大缓冲
+                    if (t - s.lastWriteNs < 500_000_000L) {
+                        s.targetMs = minOf(ADAPT_MAX_MS, s.targetMs + STEP_MS); s.lastUnderrunNs = t
+                    }
+                }
                 any = true
             }
         }
@@ -151,5 +172,8 @@ class AudioMixer(val sampleRate: Int, val channels: Int) {
         const val ENCODING_PCM_FLOAT = 4
         const val TARGET_LATENCY_MS = 120
         const val MAX_LATENCY_MS = 400
+        const val STEP_MS = 60
+        const val ADAPT_MAX_MS = 240
+        const val RELAX_MS = 20_000L
     }
 }
