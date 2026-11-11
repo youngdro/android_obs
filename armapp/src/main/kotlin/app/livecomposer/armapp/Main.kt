@@ -91,6 +91,9 @@ fun main(args: Array<String>) {
 /** 键盘点动：W/S 前后(X) A/D 左右(Y) R/F 上下(Z)，Q/E 水平转向，I/K 俯仰，J/L 自转，空格急停。 */
 private val keyAxes = mapOf(
     Key.W to (0 to 1.0), Key.S to (0 to -1.0), Key.A to (1 to 1.0), Key.D to (1 to -1.0), Key.R to (2 to 1.0), Key.F to (2 to -1.0),
+    // 方向键 / PageUp/PageDown 不受中文输入法影响
+    Key.DirectionUp to (0 to 1.0), Key.DirectionDown to (0 to -1.0), Key.DirectionLeft to (1 to 1.0), Key.DirectionRight to (1 to -1.0),
+    Key.PageUp to (2 to 1.0), Key.PageDown to (2 to -1.0),
     Key.Q to (5 to 1.0), Key.E to (5 to -1.0), Key.I to (4 to -1.0), Key.K to (4 to 1.0), Key.J to (3 to -1.0), Key.L to (3 to 1.0),
 )
 private val heldKeys = HashSet<Key>()
@@ -121,15 +124,22 @@ fun ArmScreen(s: ArmSession, dark: Boolean) {
     val st = snap.state
     Row(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxHeight().background(if (dark) Color(0xFF16181C) else Color(0xFFF4F5F7))) {
-            ArmView3D(s.ik, st?.q, st?.takeIf { it.mode != ArmController.Mode.OFF }?.setpoint, snap.toolTarget, dark)
+            val focus = androidx.compose.ui.platform.LocalFocusManager.current
+            ArmView3D(
+                s.ik, st?.q, st?.takeIf { it.mode != ArmController.Mode.OFF }?.setpoint, snap.toolTarget, dark,
+                tool = snap.tool.takeIf { st != null && st.mode != ArmController.Mode.OFF && st.mode != ArmController.Mode.FAULT },
+                onTargetDrop = { s.moveToPose(it) },
+                // 点 3D 区域：让输入框失去焦点，键盘点动重新生效
+                onPress = { focus.clearFocus(); focusedTextField = false },
+            )
             Column(Modifier.padding(12.dp).align(Alignment.TopStart)) {
                 Text(statusLine(snap), fontWeight = FontWeight.SemiBold)
                 snap.message?.let { Text(it, fontSize = 13.sp) }
                 if (st?.toolBlocked == true) Text("够不着：已到限位或工作空间边缘", color = Color(0xFFE5484D), fontSize = 13.sp)
-                Text("拖动旋转视角，滚轮缩放", fontSize = 11.sp, color = Color.Gray)
+                Text("拖橙色圆点 = 设定夹爪目标（松手后过去），拖空白处 = 旋转视角，滚轮缩放", fontSize = 11.sp, color = Color.Gray)
             }
             Column(Modifier.padding(12.dp).align(Alignment.BottomStart)) {
-                Text("键盘：W/S 前后  A/D 左右  R/F 上下  Q/E 转向  I/K 俯仰  J/L 自转  空格 急停", fontSize = 12.sp, color = Color.Gray)
+                Text("键盘（英文输入法）：W/S 前后  A/D 左右  R/F 上下  Q/E 转向  I/K 俯仰  J/L 自转  空格 急停；方向键 + PageUp/PageDown 也可平移", fontSize = 12.sp, color = Color.Gray)
             }
         }
         Column(Modifier.width(400.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
