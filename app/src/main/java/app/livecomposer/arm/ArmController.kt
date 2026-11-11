@@ -85,10 +85,11 @@ class ArmController(
             setpoint[i] = j.toRad(t)
         }
         gripperSet = gripperMeasured
+        // 先压力矩上限再写目标：写目标位置会让舵机自动开扭矩，顺序反了会短暂以全力矩保持。
+        fun retry(f: () -> Boolean) = (1..3).any { f() }
+        for (id in cal.servoIds) if (!retry { bus.setTorqueLimit(id, config.torqueLimitPermille) }) return fail("舵机 $id 无应答（设力矩上限）")
         bus.syncGoal(goals())
-        for (id in cal.servoIds) {
-            if (!bus.setTorqueLimit(id, config.torqueLimitPermille) || !bus.setTorque(id, true)) return fail("舵机 $id 无应答")
-        }
+        for (id in cal.servoIds) if (!retry { bus.setTorque(id, true) }) return fail("舵机 $id 无应答（上力）")
         fault = null; mode = Mode.IDLE; log("已上力")
         return true
     }
