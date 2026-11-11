@@ -47,7 +47,7 @@ private fun deg(r: Double) = "%.1f".format(r * 180 / PI)
 fun main(args: Array<String>) {
     val port = args.getOrNull(0) ?: error("需要串口路径")
     val calFile = args.getOrNull(1)?.let(::File)
-    val cal = calFile?.takeIf { it.exists() }?.let { ArmCalibration.fromJson(JSONObject(it.readText())) } ?: ArmCalibration.A003
+    val cal = calFile?.takeIf { it.exists() }?.let { ArmCalibration.fromJson(JSONObject(it.readText())) } ?: ArmCalibration.A003_ARM2
     val presetFile = File(args.getOrNull(2) ?: "arm_presets.json")
     val presets = LinkedHashMap<String, Preset>()
     if (presetFile.exists()) JSONObject(presetFile.readText()).let { o ->
@@ -80,7 +80,7 @@ fun main(args: Array<String>) {
         while (running) { val l = readlnOrNull() ?: "quit"; cmds.put(l.trim()) }
     }.apply { isDaemon = true }.start()
 
-    println("已连接 $port，标定：${calFile ?: "内置 A003"}。输入 help 查看命令。")
+    println("已连接 $port，标定：${calFile ?: "内置 A003 第二台（含大臂/手腕避让包络）"}。输入 help 查看命令。")
     var last = System.nanoTime()
     while (running) {
         val now = System.nanoTime(); val dt = (now - last) / 1e9; last = now

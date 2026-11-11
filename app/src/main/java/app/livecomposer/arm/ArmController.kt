@@ -10,6 +10,7 @@ import kotlin.math.min
  * - 由调用方以固定周期（建议 50Hz）调用 [tick]；每次按当前轨迹算出设定点，夹进限位后一帧同步写给全部舵机。
  * - 只下发位置设定点，不下发速度：链路一断，舵机停在最后一个设定点，不会自己跑。
  * - 保护：限位、力矩上限、负载超限急停、跟随误差过大急停。急停 = 原地保持（不卸力，避免举着手机掉下来）。
+ * - 大臂/手腕避让：标定里有 [WristEnvelope] 时，大臂抬起前手腕先让开，到位后再回到目标；遥控时手腕自动跟着让。
  *
  * 不是线程安全的：全部方法在同一个控制线程里调用。
  */
@@ -54,6 +55,10 @@ class ArmController(
     private var gripperMeasured: Double? = null
     private var loads = IntArray(n + 1)
     private var traj: Trajectory? = null
+    /** 当前这次移动剩下的分段（避让时一次移动拆成“手腕先让开 → 其余关节 → 手腕到目标”）。 */
+    private var segments = ArrayDeque<DoubleArray>()
+    private var segGripper: Double? = null
+    private var segDuration: Double? = null
     private var trajT = 0.0
     private var trajGripper: Pair<Double, Double>? = null
     private var queue = ArrayDeque<Keyframe>()
@@ -90,7 +95,7 @@ class ArmController(
 
     /** 卸力（机械臂会因重力下垂，调用方需确认已扶住）。 */
     fun disable() {
-        traj = null; queue.clear(); jogVel.fill(0.0)
+        traj = null; queue.clear(); segments.clear(); jogVel.fill(0.0)
         for (id in cal.servoIds) bus.setTorque(id, false)
         mode = Mode.OFF; log("已卸力")
     }
@@ -98,7 +103,7 @@ class ArmController(
     /** 急停：原地保持。 */
     fun stop(reason: String = "停止") {
         if (mode == Mode.OFF) return
-        traj = null; queue.clear(); jogVel.fill(0.0)
+        traj = null; queue.clear(); segments.clear(); jogVel.fill(0.0)
         if (readPose()) { setpoint = clampAll(measured.copyOf()); bus.syncGoal(goals()) }
         if (mode != Mode.FAULT) mode = Mode.IDLE
         log(reason)
@@ -110,13 +115,48 @@ class ArmController(
     fun moveTo(q: DoubleArray, gripper: Double? = null, durationS: Double? = null): Boolean {
         if (mode == Mode.OFF || mode == Mode.FAULT) return false
         require(q.size == n)
-        val target = clampAll(q.copyOf())
-        val t = max(durationS ?: 0.0, Trajectory.minDuration(setpoint, target, config.maxVelRad, config.maxAccRad))
-        traj = Trajectory(setpoint.copyOf(), target, t); trajT = 0.0
-        trajGripper = gripper?.let { (gripperSet ?: it) to it.coerceIn(0.0, 1.0) }
+        val target = withEnvelope(clampAll(q.copyOf()))
+        segments = ArrayDeque(planSegments(setpoint, target))
+        segGripper = gripper; segDuration = durationS
         levelRef = if (config.keepLevel) setpoint.copyOf() else null
         mode = Mode.MOVING
+        return startSegment()
+    }
+
+    /**
+     * 按碰撞包络把一次移动拆段：大臂路径上手腕需要的最大值高于当前手腕时，先只动手腕让开；
+     * 再动其余关节（手腕不低于让开值）；最后手腕回到目标（不低于目标大臂角度对应的下限）。
+     */
+    private fun planSegments(from: DoubleArray, target: DoubleArray): List<DoubleArray> {
+        val env = cal.wristEnvelope ?: return listOf(target)
+        if (n < 5) return listOf(target)
+        val need = env.maxAlong(from[1], target[1]) ?: return listOf(target)
+        if (need <= from[4] + 1e-6 && need <= target[4] + 1e-6) return listOf(target)
+        val out = ArrayList<DoubleArray>()
+        val clear = clampAll(doubleArrayOf(*from).also { it[4] = max(from[4], need) })
+        if (clear[4] > from[4] + 1e-6) out += clear
+        val main = target.copyOf().also { it[4] = max(target[4], need) }
+        out += clampAll(main)
+        if (target[4] < main[4] - 1e-6) out += target
+        return out
+    }
+
+    private fun startSegment(): Boolean {
+        val target = segments.removeFirstOrNull() ?: return false
+        val last = segments.isEmpty()
+        val minT = Trajectory.minDuration(setpoint, target, config.maxVelRad, config.maxAccRad)
+        // 用户给的时长只作用在主段上（避让段按速度上限走）。
+        val t = if (target.indices.any { it != 4 && abs(target[it] - setpoint[it]) > 1e-6 }) max(segDuration ?: 0.0, minT) else minT
+        traj = Trajectory(setpoint.copyOf(), target, t); trajT = 0.0
+        trajGripper = if (last) segGripper?.let { (gripperSet ?: it) to it.coerceIn(0.0, 1.0) } else null
         return true
+    }
+
+    /** 关节 5 不低于关节 2 当前角度对应的包络下限。 */
+    private fun withEnvelope(q: DoubleArray): DoubleArray {
+        val m = cal.wristEnvelope?.minWrist(q[1]) ?: return q
+        if (q[4] < m) { q[4] = m; clampAll(q) }
+        return q
     }
 
     fun play(preset: Preset): Boolean {
@@ -148,16 +188,22 @@ class ArmController(
                     trajT += dtS
                     setpoint = clampAll(tr.at(trajT))
                     levelRef?.let { ref -> setpoint[4] = ArmKinematics.wristForLevel(setpoint, ref); setpoint = clampAll(setpoint) }
+                    setpoint = withEnvelope(setpoint)
                     trajGripper?.let { (a, b) -> gripperSet = a + (b - a) * (trajT / tr.durationS).coerceIn(0.0, 1.0) }
-                    if (tr.done(trajT)) { traj = null; holdLeft = queueHold; if (holdLeft <= 0 && !nextFrame()) mode = Mode.IDLE }
+                    if (tr.done(trajT)) {
+                        traj = null
+                        if (!startSegment()) { holdLeft = queueHold; if (holdLeft <= 0 && !nextFrame()) mode = Mode.IDLE }
+                    }
                 }
             }
             Mode.JOG -> {
                 jogAge += dtS
                 if (jogAge > jogTimeoutS) { jogVel.fill(0.0); mode = Mode.IDLE }
                 else {
+                    val prev = setpoint.copyOf()
                     for (i in 0 until n) setpoint[i] += jogVel[i] * dtS
                     setpoint = clampAll(setpoint)
+                    jogEnvelope(prev, dtS)
                 }
             }
             else -> {}
@@ -167,6 +213,18 @@ class ArmController(
     }
 
     private var queueHold = 0.0
+
+    /** 遥控时的避让：大臂要抬到手腕还没让开的位置，就先停住大臂、手腕以遥控速度转开；手腕不能往下压进包络。 */
+    private fun jogEnvelope(prev: DoubleArray, dtS: Double) {
+        val env = cal.wristEnvelope ?: return
+        if (n < 5) return
+        val need = env.minWrist(setpoint[1]) ?: return
+        if (setpoint[4] >= need) return
+        val step = config.jogVelRad * dtS
+        setpoint[4] = min(need, max(setpoint[4], prev[4]) + step)
+        if (setpoint[4] < need) setpoint[1] = prev[1] // 手腕没让开前大臂原地等
+        setpoint = clampAll(setpoint)
+    }
 
     private fun nextFrame(): Boolean {
         val f = queue.removeFirstOrNull() ?: return false

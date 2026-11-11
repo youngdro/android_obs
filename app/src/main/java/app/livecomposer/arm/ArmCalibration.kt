@@ -43,7 +43,7 @@ data class GripperCal(val servoId: Int, val closedTick: Int, val openTick: Int) 
     fun toOpen(tick: Int): Double = ((tick - closedTick).toDouble() / (openTick - closedTick)).coerceIn(0.0, 1.0)
 }
 
-data class ArmCalibration(val joints: List<JointCal>, val gripper: GripperCal?) {
+data class ArmCalibration(val joints: List<JointCal>, val gripper: GripperCal?, val wristEnvelope: WristEnvelope? = null) {
     val servoIds: List<Int> get() = joints.map { it.servoId } + listOfNotNull(gripper?.servoId)
 
     fun toJson(): org.json.JSONObject = org.json.JSONObject().apply {
@@ -53,6 +53,7 @@ data class ArmCalibration(val joints: List<JointCal>, val gripper: GripperCal?) 
                 .put("sign", j.sign).put("minTick", j.minTick).put("maxTick", j.maxTick))
         })
         gripper?.let { put("gripper", org.json.JSONObject().put("servoId", it.servoId).put("closedTick", it.closedTick).put("openTick", it.openTick)) }
+        wristEnvelope?.let { put("wristEnvelope", it.toJson()) }
     }
 
     companion object {
@@ -63,7 +64,8 @@ data class ArmCalibration(val joints: List<JointCal>, val gripper: GripperCal?) 
                 JointCal(j.getString("name"), j.getInt("servoId"), j.getInt("zeroTick"), j.getInt("sign"), j.getInt("minTick"), j.getInt("maxTick"))
             }
             val g = o.optJSONObject("gripper")?.let { GripperCal(it.getInt("servoId"), it.getInt("closedTick"), it.getInt("openTick")) }
-            return ArmCalibration(joints, g)
+            val env = o.optJSONArray("wristEnvelope")?.let { WristEnvelope.fromJson(it) }
+            return ArmCalibration(joints, g, env)
         }
 
         /**
@@ -83,6 +85,21 @@ data class ArmCalibration(val joints: List<JointCal>, val gripper: GripperCal?) 
                 JointCal("joint6", 6, 2005, +1, 286, 3882),   // 实测 128-3882，EEPROM 286-3979
             ),
             gripper = GripperCal(7, closedTick = 2042, openTick = 3273),
+        )
+
+        /** 第二台 a003（2026-11-11 换用，夹爪更防滑）。方向沿用第一台，限位同样取实测与 EEPROM 的交集。 */
+        val A003_ARM2 = ArmCalibration(
+            joints = listOf(
+                JointCal("joint1", 1, 2081, +1, 931, 3047),
+                // 手腕不让开时大臂只能抬约 43°（2535）；配合包络自动让开后可到 EEPROM 允许的更高处
+                JointCal("joint2", 2, 3020, +1, 2535, 3020),
+                JointCal("joint3", 3, 3003, +1, 1108, 3002),
+                JointCal("joint4", 4, 2041, -1, 944, 2796),
+                JointCal("joint5", 5, 2984, -1, 562, 3023),
+                JointCal("joint6", 6, 2049, +1, 1328, 3139),
+            ),
+            gripper = GripperCal(7, closedTick = 2054, openTick = 2921),
+            wristEnvelope = WristEnvelope.A003_ARM2,
         )
     }
 }
