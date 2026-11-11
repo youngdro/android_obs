@@ -81,6 +81,7 @@ class ArmSession(val cal: ArmCalibration, private val dataDir: File) {
             val a = ArmController(StsBus(l), cal, ArmController.Config(torqueLimitPermille = torquePct * 10, abortLoad = maxOf(400, torquePct * 10 - 50))) { say(it) }
             arm = a
             a.setGripperForce(gripperForcePct * 10)
+            a.carryGripFrom(old)
             if (a.enable()) say("已上力（力矩上限 $torquePct%）") else say("上力失败：${a.state.fault}")
         }
     }
@@ -89,6 +90,9 @@ class ArmSession(val cal: ArmCalibration, private val dataDir: File) {
     fun clearFault() = post { it.clearFault() }
     fun home() = post { it.moveTo(ik.project(DoubleArray(6))) }
     fun setGripper(open: Double) = post { it.setGripper(open) }
+    /** 握持：慢慢合上直到夹紧，然后锁定（回放/移动/卸力都不松开）。 */
+    fun grasp() = post { if (!it.grasp()) say("握持需要先上力") }
+    fun releaseGrasp() = post { it.releaseGrasp() }
 
     fun moveToPose(p: ToolPose) = post { a ->
         lastTarget = p

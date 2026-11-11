@@ -25,6 +25,10 @@ class ArmController(
         val torqueLimitPermille: Int = 400,
         /** 夹爪的力矩上限 = 夹持力度（位置控制下夹住物体时就以这个力顶着）。为空时与关节相同。 */
         val gripperTorquePermille: Int? = null,
+        /** 握持：慢慢合上，夹爪负载超过它就认为夹住了。 */
+        val graspLoad: Int = 150,
+        /** 握持时夹爪温度达到它就报警（不松开）。 */
+        val gripperWarnTempC: Int = 60,
         /** 轨迹速度上限：实机上小臂展开收回 6 秒（≈0.9 rad/s 峰值）会跟不上，12 秒可以，取 0.5。 */
         val maxVelRad: Double = 0.5,
         val maxAccRad: Double = 1.0,
@@ -55,6 +59,10 @@ class ArmController(
         val recording: Boolean = false,
         /** 回放进度 0..1，不在回放时为 null。 */
         val playbackProgress: Double? = null,
+        /** 夹爪锁定在握持状态：回放、回零、移动、卸力都不会松开。 */
+        val gripperLocked: Boolean = false,
+        val grasping: Boolean = false,
+        val gripperTempC: Int? = null,
     )
 
     /** 逆运动学，和控制器用同一份标定（限位、手腕包络）。 */
@@ -85,7 +93,29 @@ class ArmController(
     val state: State get() = State(
         mode, measured.copyOf(), gripperMeasured, loads.copyOf(), fault, setpoint.copyOf(), toolBlocked, recorder != null,
         playback?.let { (pbT / it.last().first).coerceIn(0.0, 1.0) },
+        gripperLocked, grasping, gripperTemp,
     )
+
+    private var gripperLocked = false
+    private var grasping = false
+    private var gripperTemp: Int? = null
+
+    /**
+     * 握持：夹爪慢慢合上，负载超过 [Config.graspLoad] 时停在那里再往里压一点点，然后锁定。
+     * 锁定后夹爪不再跟随回放/移动/滑条，卸力时也保持夹爪上力，防止手机掉落。
+     */
+    fun grasp(): Boolean {
+        if (mode == Mode.OFF || mode == Mode.FAULT || cal.gripper == null) return false
+        gripperTarget = null; gripperLocked = false; grasping = true
+        log("握持：慢慢合上夹爪")
+        return true
+    }
+
+    /** 解除握持锁定（夹爪停在原处，之后可以用滑条松开）。 */
+    /** 换控制器实例（比如改力矩上限）时把握持锁定接过来。 */
+    fun carryGripFrom(o: ArmController) { if (o.gripperLocked) { gripperLocked = true; gripperSet = o.gripperSet; gripperForce = o.gripperForce ?: gripperForce } }
+
+    fun releaseGrasp() { grasping = false; gripperLocked = false; log("已解除握持锁定") }
 
     // —— 空间点动 ——
     private var toolVel = DoubleArray(6)
@@ -117,7 +147,8 @@ class ArmController(
             val t = j.clampTick(j.toTick(measured[i]))
             setpoint[i] = j.toRad(t)
         }
-        gripperSet = gripperMeasured
+        // 握持锁定时保持原来的夹紧设定点（实际位置会因夹着东西比设定点略开）
+        if (!gripperLocked || gripperSet == null) gripperSet = gripperMeasured
         // 先压力矩上限再写目标：写目标位置会让舵机自动开扭矩，顺序反了会短暂以全力矩保持。
         fun retry(f: () -> Boolean) = (1..3).any { f() }
         for (id in cal.servoIds) {
@@ -133,8 +164,10 @@ class ArmController(
     /** 卸力（机械臂会因重力下垂，调用方需确认已扶住）。 */
     fun disable() {
         traj = null; queue.clear(); segments.clear(); jogVel.fill(0.0); toolVel.fill(0.0); playback = null; pendingPlayback = null; gripperTarget = null
-        for (id in cal.servoIds) bus.setTorque(id, false)
-        mode = Mode.OFF; log("已卸力")
+        val keep = if (gripperLocked) cal.gripper?.servoId else null
+        for (id in cal.servoIds) if (id != keep) bus.setTorque(id, false)
+        grasping = false
+        mode = Mode.OFF; log(if (keep != null) "已卸力（夹爪保持握持）" else "已卸力")
     }
 
     /** 急停：原地保持。 */
@@ -154,7 +187,7 @@ class ArmController(
         require(q.size == n)
         val target = withEnvelope(clampAll(q.copyOf()))
         segments = ArrayDeque(planSegments(setpoint, target))
-        segGripper = gripper; segDuration = durationS
+        segGripper = if (gripperLocked || grasping) null else gripper; segDuration = durationS
         levelRef = if (config.keepLevel) setpoint.copyOf() else null
         mode = Mode.MOVING
         return startSegment()
@@ -232,6 +265,7 @@ class ArmController(
     /** 夹爪开合 0..1，平滑过去（约 1 秒走完全程）。 */
     fun setGripper(open: Double) {
         if (mode == Mode.OFF || mode == Mode.FAULT || cal.gripper == null) return
+        if (gripperLocked || grasping) { log("夹爪在握持中，先解除锁定"); return }
         gripperTarget = open.coerceIn(0.0, 1.0)
     }
 
@@ -251,6 +285,7 @@ class ArmController(
      */
     fun playRecording(rec: Recording, speed: Double = 1.0, holdGripper: Boolean = false): Boolean {
         if (mode == Mode.OFF || mode == Mode.FAULT || rec.samples.size < 2) return false
+        val hold = holdGripper || gripperLocked || grasping
         val vmax = max(config.maxVelRad, config.jogVelRad)
         val pts = smooth(rec.samples).map { s -> s to withEnvelope(clampAll(s.copyOf(n))) }
         val timed = ArrayList<Pair<Double, DoubleArray>>()
@@ -263,11 +298,11 @@ class ArmController(
                 t += max(rec.periodS / speed, d / vmax)
             }
             // holdGripper：夹爪保持当前夹持（例如拿着手机回放运镜），不跟录制走
-            timed += t to (if (holdGripper) q else q + raw.copyOfRange(n, raw.size))
+            timed += t to (if (hold) q else q + raw.copyOfRange(n, raw.size))
         }
         val start = timed.first().second
         pendingPlayback = timed
-        val g = if (holdGripper) null else start.getOrNull(n)?.takeIf { !it.isNaN() }
+        val g = if (hold) null else start.getOrNull(n)?.takeIf { !it.isNaN() }
         moveTo(start.copyOf(n), g)
         return true
     }
@@ -362,6 +397,11 @@ class ArmController(
             }
             else -> {}
         }
+        if (grasping) graspStep(dtS)
+        if (gripperLocked && ticks % 50 == 0) cal.gripper?.let { g ->
+            bus.read(g.servoId, StsProtocol.ADDR_PRESENT_TEMPERATURE, 1)?.let { gripperTemp = it[0].toInt() and 0xFF }
+            gripperTemp?.let { if (it >= config.gripperWarnTempC) log("夹爪温度 $it°C 偏高，注意（保持握持）") }
+        }
         gripperTarget?.let { gt ->
             if (trajGripper == null || mode != Mode.MOVING) {
                 val g = gripperSet ?: gt
@@ -374,6 +414,22 @@ class ArmController(
     }
 
     private var queueHold = 0.0
+
+    private fun graspStep(dtS: Double) {
+        val g = cal.gripper ?: run { grasping = false; return }
+        val load = bus.load(g.servoId)?.let { abs(it) } ?: 0
+        val pos = bus.position(g.servoId)?.let { g.toOpen(it) }
+        if (load > config.graspLoad && pos != null) {
+            // 夹住了：设定点放在实际位置再往里一点，力度由夹爪力矩上限决定
+            gripperSet = max(0.0, pos - 0.03)
+            grasping = false; gripperLocked = true
+            log("已夹住（负载 $load），夹爪锁定")
+            return
+        }
+        val cur = gripperSet ?: pos ?: 0.0
+        val next = cur - GRASP_SPEED * dtS
+        if (next <= 0.0) { gripperSet = 0.0; grasping = false; log("夹爪已合上，没有夹到东西") } else gripperSet = next
+    }
 
     private fun finishMove() {
         val pb = pendingPlayback
@@ -474,5 +530,7 @@ class ArmController(
         const val RECORD_PERIOD_S = 0.05
         /** 夹爪开合速度（全程/秒）。 */
         const val GRIPPER_SPEED = 1.0
+        /** 握持时夹爪合拢速度（全程/秒）。 */
+        const val GRASP_SPEED = 0.25
     }
 }

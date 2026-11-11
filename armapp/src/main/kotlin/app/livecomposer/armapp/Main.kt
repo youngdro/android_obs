@@ -294,11 +294,27 @@ private fun GripperPanel(s: ArmSession, snap: ArmSession.Snapshot) {
         Text("夹持力度 ${force.toInt()}%", Modifier.width(110.dp), fontSize = 13.sp)
         Slider(force, { force = it }, onValueChangeFinished = { s.setGripperForce(force.toInt()) }, valueRange = 10f..80f, modifier = Modifier.weight(1f))
     }
+    val st = snap.state
+    val held = st?.gripperLocked == true || st?.grasping == true
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text("合", fontSize = 13.sp)
-        Slider(g, { g = it }, onValueChangeFinished = { s.setGripper(g.toDouble()) }, modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
+        Slider(g, { g = it }, onValueChangeFinished = { s.setGripper(g.toDouble()) }, enabled = !held, modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
         Text("开", fontSize = 13.sp)
     }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (held) OutlinedButton(onClick = { s.releaseGrasp() }) { Text("解除锁定") }
+        else Button(onClick = { s.grasp() }) { Text("握持（慢慢合上直到夹紧）") }
+        Text(
+            when {
+                st?.grasping == true -> "正在合拢…"
+                st?.gripperLocked == true -> "已锁定" + (st.gripperTempC?.let { "  温度 $it°C" } ?: "")
+                else -> ""
+            },
+            fontSize = 13.sp,
+            color = if ((st?.gripperTempC ?: 0) >= 60) Color(0xFFE5484D) else Color.Gray,
+        )
+    }
+    if (st?.gripperLocked == true) Text("锁定后回放、移动、卸力都不会松开夹爪", fontSize = 11.sp, color = Color.Gray)
 }
 
 @Composable

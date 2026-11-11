@@ -325,7 +325,31 @@ fun main() {
     val m3 = meas3()
     check("手掰轨迹回放并套用包络", abs(m3[0] - Math.toRadians(30.0)) < 0.02 && m3[4] >= env.minWrist(m3)!! - 0.01,
         "底座 ${"%.1f".format(Math.toDegrees(m3[0]))}° 手腕 ${"%.1f".format(Math.toDegrees(m3[4]))}°")
+
+    // 握持：慢慢合上，碰到东西（负载升高）就锁定；锁定后回放、卸力都不松开
+    val gc = cal2.gripper!!; val gs = sim3.servos[gc.servoId]!!
+    arm3.moveTo(home); run3(15.0)
+    arm3.setGripper(0.7); run3(2.0)
+    val stuck = gc.toTick(0.3); gs.stuckAt = stuck
+    arm3.grasp()
+    repeat(400) { arm3.tick(0.02); sim3.step(0.02); if (gs.pos.toInt() == stuck) gs.load = 300 }
+    check("握持夹住后锁定", arm3.state.gripperLocked && !arm3.state.grasping && abs(gc.toOpen(gs.pos.toInt()) - 0.3) < 0.02,
+        "锁定 ${arm3.state.gripperLocked} 开合 ${"%.2f".format(gc.toOpen(gs.pos.toInt()))}")
+    arm3.setGripper(1.0); run3(1.0)
+    arm3.playRecording(recJson); repeat(1500) { arm3.tick(0.02); sim3.step(0.02) }
+    check("锁定时滑条和回放都不动夹爪", abs(gc.toOpen(gs.pos.toInt()) - 0.3) < 0.02 && abs(gc.toOpen(gs.goal) - 0.27) < 0.02,
+        "开合 ${"%.2f".format(gc.toOpen(gs.pos.toInt()))} 目标 ${"%.2f".format(gc.toOpen(gs.goal))}")
+    arm3.moveTo(home); run3(15.0)
     arm3.disable()
+    check("锁定时卸力保持夹爪上力", gs.torque && sim3.servos.filterKeys { it != gc.servoId }.values.none { it.torque })
+    val arm4 = ArmController(StsBus(sim3, 5), cal2); arm4.carryGripFrom(arm3)
+    for (sv in sim3.servos.values) sv.goal = sv.pos.toInt()
+    arm4.enable(); arm4.tick(0.02)
+    check("换控制器后握持锁定保留", arm4.state.gripperLocked && abs(gc.toOpen(gs.goal) - 0.27) < 0.02, "目标 ${"%.2f".format(gc.toOpen(gs.goal))}")
+    arm4.releaseGrasp(); arm4.setGripper(0.8); repeat(100) { arm4.tick(0.02); sim3.step(0.02) }
+    gs.stuckAt = null; gs.load = 0; repeat(100) { arm4.tick(0.02); sim3.step(0.02) }
+    check("解除锁定后夹爪可以松开", !arm4.state.gripperLocked && abs(gc.toOpen(gs.pos.toInt()) - 0.8) < 0.03, "开合 ${"%.2f".format(gc.toOpen(gs.pos.toInt()))}")
+    arm4.disable()
 
     println(if (failed == 0) "全部通过" else "$failed 项失败")
     exitProcess(if (failed == 0) 0 else 1)
