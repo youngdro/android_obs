@@ -79,7 +79,7 @@ import app.livecomposer.core.Layer
 import app.livecomposer.engine.EngineState
 import app.livecomposer.engine.LiveState
 
-enum class Panel { NONE, LAYERS, INSPECTOR, ADD, SETTINGS, SCENES, CAMSTREAM, VISION }
+enum class Panel { NONE, LAYERS, INSPECTOR, ADD, SETTINGS, SCENES, CAMSTREAM, VISION, CONFIG }
 
 /** 界面对引擎的全部操作。 */
 class StudioCallbacks(
@@ -107,6 +107,7 @@ class StudioCallbacks(
     val scenes: SceneActions,
     val camStream: CamStreamActions,
     val vision: VisionActions,
+    val config: ConfigActions,
 )
 
 class StudioUi {
@@ -120,6 +121,10 @@ class StudioUi {
     var confirmDelete by mutableStateOf<String?>(null)
     var confirmDeleteScene by mutableStateOf<String?>(null)
     var backgroundStopped by mutableStateOf(false)
+    /** 待确认加载的整体配置。 */
+    var importPreview by mutableStateOf<ImportPreview?>(null)
+    var cloudLoading by mutableStateOf(false)
+    var cloudError by mutableStateOf<String?>(null)
 }
 
 @Composable
@@ -423,7 +428,7 @@ private fun PanelHost(state: EngineState, ui: StudioUi, cb: StudioCallbacks, lan
                 onAddText = { t -> cb.onAddText(t)?.let { ui.selectedId = it; ui.panel = Panel.INSPECTOR } },
                 onClose = close, modifier = panelModifier)
             Panel.SETTINGS -> SettingsPanel(state, ui.urlError, { edit -> cb.onApply(edit); ui.urlError = null },
-                cb.onSyncTest, ui.showPerf, { ui.showPerf = it }, close, panelModifier)
+                cb.onSyncTest, ui.showPerf, { ui.showPerf = it }, close, panelModifier, onOpenConfig = { ui.panel = Panel.CONFIG })
             Panel.SCENES -> ScenesPanel(state, SceneActions(
                 onSave = cb.scenes.onSave, onOverwrite = cb.scenes.onOverwrite,
                 onApply = { id -> ui.selectedId = null; cb.scenes.onApply(id) },
@@ -431,6 +436,7 @@ private fun PanelHost(state: EngineState, ui: StudioUi, cb: StudioCallbacks, lan
             ), close, panelModifier)
             Panel.CAMSTREAM -> CamStreamPanel(state, cb.camStream, close, panelModifier)
             Panel.VISION -> VisionPanel(state, cb.vision, close, panelModifier)
+            Panel.CONFIG -> ConfigPanel(state, ui, cb.config, close, panelModifier)
             Panel.NONE -> {}
         }
     }
@@ -470,6 +476,16 @@ private fun Dialogs(state: EngineState, ui: StudioUi, cb: StudioCallbacks) {
             text = { Text("“${sc?.name ?: ""}”将被删除，当前画面不受影响。", color = Studio.TextDim) },
             confirmButton = { TextButton({ ui.confirmDeleteScene = null; cb.scenes.onDelete(id) }) { Text("删除", color = Studio.Live, fontWeight = FontWeight.Bold) } },
             dismissButton = { TextButton({ ui.confirmDeleteScene = null }) { Text("取消", color = Studio.Text) } },
+        )
+    }
+    ui.importPreview?.let { pv ->
+        AlertDialog(
+            onDismissRequest = { cb.config.onCancelImport() },
+            containerColor = Studio.SurfaceHigh,
+            title = { Text("加载这份配置？", color = Studio.Text) },
+            text = { Text(pv.describe(), color = Studio.TextDim) },
+            confirmButton = { TextButton({ cb.config.onConfirmImport() }) { Text("加载", color = Studio.Accent, fontWeight = FontWeight.Bold) } },
+            dismissButton = { TextButton({ cb.config.onCancelImport() }) { Text("取消", color = Studio.Text) } },
         )
     }
     if (ui.backgroundStopped) {

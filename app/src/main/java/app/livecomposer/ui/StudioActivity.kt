@@ -74,6 +74,48 @@ class StudioActivity : ComponentActivity() {
         engine.addImageLayer(uri)?.let { ui.selectedId = it.id; ui.panel = Panel.INSPECTOR }
     }
 
+    // ---- 整体配置导出 / 加载
+    private var exportSecrets = true
+    private var pendingImport: app.livecomposer.core.ConfigBundle.Parsed? = null
+
+    private val exportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri: Uri? ->
+        if (uri == null) return@registerForActivityResult
+        try {
+            val text = engine.exportConfig(exportSecrets)
+            contentResolver.openOutputStream(uri, "wt")?.use { it.write(text.toByteArray(Charsets.UTF_8)) }
+                ?: throw java.io.IOException("无法写入")
+            engine.notify(if (exportSecrets) "配置已导出（含密钥，请妥善保管）" else "配置已导出（不含密钥）")
+        } catch (e: Exception) {
+            engine.notify("导出失败：${e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    private val importLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri == null) return@registerForActivityResult
+        try {
+            val bytes = contentResolver.openInputStream(uri)?.use { input ->
+                val buf = java.io.ByteArrayOutputStream()
+                val chunk = ByteArray(64 * 1024)
+                while (true) {
+                    val n = input.read(chunk); if (n < 0) break
+                    buf.write(chunk, 0, n)
+                    if (buf.size() > app.livecomposer.core.ConfigBundle.MAX_BYTES) throw IllegalArgumentException("配置太大（超过 2MB）")
+                }
+                buf.toByteArray()
+            } ?: throw java.io.IOException("无法读取文件")
+            showImport(app.livecomposer.core.ConfigBundle.parse(String(bytes, Charsets.UTF_8)), "文件")
+        } catch (e: IllegalArgumentException) {
+            engine.notify("无法加载：${e.message}")
+        } catch (e: Exception) {
+            engine.notify("读取文件失败：${e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    private fun showImport(p: app.livecomposer.core.ConfigBundle.Parsed, source: String) {
+        pendingImport = p
+        ui.importPreview = ImportPreview(p, source)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -94,6 +136,8 @@ class StudioActivity : ComponentActivity() {
             state.value = s
             if (dimmed && !s.isStreaming && !s.cam.active) { undim(); scheduleDim() } // 停播后恢复亮度
         }
+        engine.onRestartRequested = { restartNotice = "配置已加载"; main.post { recreate() } }
+        restartNotice?.let { restartNotice = null; engine.notify(it) }
         state.value = engine.snapshot()
         applyOrientation()
 
@@ -174,6 +218,41 @@ class StudioActivity : ComponentActivity() {
                 onStop = { engine.stopCamStream() },
                 validate = { engine.validateCamUrl() },
             ),
+            config = ConfigActions(
+                onExport = { secrets ->
+                    exportSecrets = secrets
+                    val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.getDefault()).format(java.util.Date())
+                    exportLauncher.launch("livecomposer-config-$stamp.json")
+                },
+                onImportFile = {
+                    val err = engine.configLockedReason()
+                    if (err != null) engine.notify(err) else importLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream", "*/*"))
+                },
+                onImportCloud = {
+                    val err = engine.configLockedReason()
+                    if (err != null) engine.notify(err)
+                    else {
+                        ui.cloudLoading = true; ui.cloudError = null
+                        engine.fetchCloudConfig { r ->
+                            ui.cloudLoading = false
+                            when (r) {
+                                is app.livecomposer.core.ConfigFetcher.Result.Ok -> showImport(r.parsed, "云端（liveId ${engine.config.cloudLiveId}）")
+                                is app.livecomposer.core.ConfigFetcher.Result.Fail -> ui.cloudError = r.message
+                            }
+                        }
+                    }
+                },
+                onEditCloud = { edit -> engine.updateCloudConfig(edit); ui.cloudError = null },
+                onConfirmImport = {
+                    val p = pendingImport
+                    pendingImport = null; ui.importPreview = null
+                    if (p != null) {
+                        val err = engine.applyConfig(p)
+                        if (err != null) engine.notify(err) else ui.panel = Panel.NONE
+                    }
+                },
+                onCancelImport = { pendingImport = null; ui.importPreview = null },
+            ),
             vision = VisionActions(
                 onEdit = { edit -> engine.updateVision(edit) },
                 onConnect = { engine.connectVision() },
@@ -252,6 +331,8 @@ class StudioActivity : ComponentActivity() {
     }
 
     companion object {
+        /** 加载配置后重建界面，重建完显示的提示。 */
+        private var restartNotice: String? = null
         private const val DIM_AFTER_MS = 60_000L
         private const val DIM_LEVEL = 0.15f
     }

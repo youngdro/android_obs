@@ -1,6 +1,8 @@
 package app.livecomposer.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -22,6 +24,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import app.livecomposer.core.AppConfig
 import app.livecomposer.core.CanvasOrientation
 import app.livecomposer.core.Resolution
@@ -41,6 +44,7 @@ fun SettingsPanel(
     onShowPerf: (Boolean) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    onOpenConfig: () -> Unit = {},
 ) {
     val locked = state.isStreaming
     PanelShell("设置", onClose, modifier) {
@@ -48,6 +52,18 @@ fun SettingsPanel(
             Text("直播中：画布、编码和推流地址已锁定，停止推流后可修改。",
                 style = MaterialTheme.typography.bodySmall, color = Studio.Warn,
                 modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Studio.Warn.copy(alpha = 0.12f)).padding(10.dp))
+        }
+
+        Row(
+            Modifier.fillMaxWidth().padding(bottom = 4.dp).clip(RoundedCornerShape(12.dp)).background(Studio.Surface)
+                .clickable(onClick = onOpenConfig).padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("导入 / 导出配置", style = MaterialTheme.typography.bodyMedium)
+                Text("备份到文件、换手机恢复，或按 liveId 从云端一键设置", style = MaterialTheme.typography.bodySmall)
+            }
+            Text("›", color = Studio.TextDim, fontSize = 20.sp)
         }
 
         Section("推流目标") {
