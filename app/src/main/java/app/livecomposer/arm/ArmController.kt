@@ -32,6 +32,11 @@ class ArmController(
         /** 轨迹速度上限：实机上小臂展开收回 6 秒（≈0.9 rad/s 峰值）会跟不上，12 秒可以，取 0.5。 */
         val maxVelRad: Double = 0.5,
         val maxAccRad: Double = 1.0,
+        /**
+         * 回放时每个关节的最大速度。录制的动作本身就是机械臂做得出来的（手掰的速度也在舵机能力内，ST3215 空载约 4.7 rad/s），
+         * 所以比 [maxVelRad]（规划的长距离移动）放得宽；只有超过它的片段才放慢。
+         */
+        val playbackVelRad: Double = 2.5,
         /** 遥控时每个关节的最大速度。 */
         val jogVelRad: Double = 0.6,
         val abortLoad: Int = 400,
@@ -296,10 +301,10 @@ class ArmController(
      * 回放连续轨迹：先慢速走到轨迹起点（避让照常），再按录制节奏回放。每个采样都夹进限位、套手腕包络，
      * 相邻采样之间关节变化超过速度上限的地方自动放慢。[speed] > 1 加快，< 1 放慢。
      */
-    fun playRecording(rec: Recording, speed: Double = 1.0, holdGripper: Boolean = false): Boolean {
+    fun playRecording(rec: Recording, speed: Double = 1.0, holdGripper: Boolean = false, maxVelRad: Double = config.playbackVelRad): Boolean {
         if (mode == Mode.OFF || mode == Mode.FAULT || rec.samples.size < 2) return false
         val hold = holdGripper || gripperLocked || grasping
-        val vmax = max(config.maxVelRad, config.jogVelRad)
+        val vmax = max(maxVelRad, config.jogVelRad)
         val pts = smooth(rec.samples).map { s -> s to withEnvelope(clampAll(s.copyOf(n))) }
         val timed = ArrayList<Pair<Double, DoubleArray>>()
         var t = 0.0
@@ -314,6 +319,8 @@ class ArmController(
             timed += t to (if (hold) q else q + raw.copyOfRange(n, raw.size))
         }
         val start = timed.first().second
+        val natural = (pts.size - 1) * rec.periodS / speed
+        if (t > natural * 1.05) log("录制里有动作超过回放速度上限，这些片段放慢了（${"%.1f".format(natural)} 秒 → ${"%.1f".format(t)} 秒）")
         pendingPlayback = timed
         val g = if (hold) null else start.getOrNull(n)?.takeIf { !it.isNaN() }
         moveTo(start.copyOf(n), g)

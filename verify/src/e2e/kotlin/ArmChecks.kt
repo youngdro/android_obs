@@ -326,6 +326,18 @@ fun main() {
     check("手掰轨迹回放并套用包络", abs(m3[0] - Math.toRadians(30.0)) < 0.02 && m3[4] >= env.minWrist(m3)!! - 0.01,
         "底座 ${"%.1f".format(Math.toDegrees(m3[0]))}° 手腕 ${"%.1f".format(Math.toDegrees(m3[4]))}°")
 
+    // 快速手掰（底座 1 秒转 1.5 rad）按原速回放，2 倍速时间减半
+    arm3.moveTo(home); run3(15.0)
+    val fast = Recording("快", 0.05, (0..20).map { k -> home.copyOf().also { it[0] = 1.5 * k / 20 } + doubleArrayOf(Double.NaN) })
+    fun playTime(speed: Double): Double {
+        arm3.moveTo(home); run3(15.0)
+        arm3.playRecording(fast, speed, maxVelRad = 4.0); var t = 0.0
+        repeat(1500) { arm3.tick(0.02); sim3.step(0.02); if (arm3.state.mode == ArmController.Mode.PLAYBACK) t += 0.02 }
+        return t
+    }
+    val pt1 = playTime(1.0); val pt2 = playTime(2.0)
+    check("快速动作按原速回放", abs(pt1 - 1.0) < 0.1 && abs(pt2 - 0.5) < 0.1, "1 倍 ${"%.2f".format(pt1)} 秒，2 倍 ${"%.2f".format(pt2)} 秒")
+
     // 握持：慢慢合上，碰到东西（负载升高）就锁定；锁定后回放、卸力都不松开
     val gc = cal2.gripper!!; val gs = sim3.servos[gc.servoId]!!
     arm3.moveTo(home); run3(15.0)

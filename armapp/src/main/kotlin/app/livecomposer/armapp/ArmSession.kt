@@ -126,9 +126,12 @@ class ArmSession(val cal: ArmCalibration, private val dataDir: File) {
         say("已保存「${r.name}」，${"%.1f".format(r.durationS)} 秒")
     }
 
-    fun play(name: String, speed: Double, holdGripper: Boolean) = post { a ->
+    fun play(name: String, speed: Double, holdGripper: Boolean, maxVelDeg: Int) = post { a ->
         val r = recordings.firstOrNull { it.name == name } ?: return@post
-        if (a.playRecording(r, speed, holdGripper)) say("回放「$name」：先回到起点" + if (holdGripper) "（夹爪保持当前夹持）" else "")
+        message = null
+        val ok = a.playRecording(r, speed, holdGripper, Math.toRadians(maxVelDeg.toDouble()))
+        val note = message
+        if (ok) say("回放「$name」：先回到起点" + (if (holdGripper) "（夹爪保持当前夹持）" else "") + (note?.let { "。$it" } ?: ""))
         else say("回放需要先上力")
     }
 

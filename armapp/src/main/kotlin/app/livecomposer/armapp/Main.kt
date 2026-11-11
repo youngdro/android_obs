@@ -329,6 +329,7 @@ private fun RecordingPanel(s: ArmSession, snap: ArmSession.Snapshot) {
     var name by remember { mutableStateOf("") }
     var byHand by remember { mutableStateOf(false) }
     var speed by remember { mutableStateOf(1f) }
+    var vlim by remember { mutableStateOf(145f) }
     var holdGrip by remember { mutableStateOf(true) }
     Text("轨迹录制", fontWeight = FontWeight.Bold)
     when (snap.recordingState) {
@@ -351,6 +352,11 @@ private fun RecordingPanel(s: ArmSession, snap: ArmSession.Snapshot) {
         Slider(speed, { speed = it }, valueRange = 0.25f..2f, modifier = Modifier.weight(1f))
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("关节限速 ${vlim.toInt()}°/s", Modifier.width(110.dp), fontSize = 13.sp)
+        Slider(vlim, { vlim = it }, valueRange = 60f..270f, modifier = Modifier.weight(1f))
+    }
+    Text("录制里比这快的片段会放慢；调高更接近原速，但大幅动作和夹着东西时更容易冲过头或触发卡住保护", fontSize = 11.sp, color = Color.Gray)
+    Row(verticalAlignment = Alignment.CenterVertically) {
         Checkbox(holdGrip, { holdGrip = it })
         Text("回放时夹爪保持当前夹持（拿着手机时勾上）", fontSize = 13.sp)
     }
@@ -359,7 +365,7 @@ private fun RecordingPanel(s: ArmSession, snap: ArmSession.Snapshot) {
     snap.recordings.forEach { r ->
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("${r.name}  ${"%.1f".format(r.durationS)} 秒", Modifier.weight(1f), fontSize = 13.sp)
-            TextButton({ s.play(r.name, speed.toDouble(), holdGrip) }) { Text("播放") }
+            TextButton({ s.play(r.name, speed.toDouble(), holdGrip, vlim.toInt()) }) { Text("播放") }
             TextButton({ s.deleteRecording(r.name) }) { Text("删除", color = Color(0xFFE5484D)) }
         }
     }
@@ -415,7 +421,7 @@ private fun selfTest(s: ArmSession) {
     Thread.sleep(500); val endPose = s.snapshot.tool; log("录制中动作完成")
     s.stopRecording("自检"); Thread.sleep(500); log("结束录制，共 ${s.snapshot.recordings.size} 条")
     s.home(); waitMove(20.0); log("回零")
-    s.play("自检", 1.0, false)
+    s.play("自检", 1.0, false, 145)
     waitFor(10.0) { it.state?.mode == ArmController.Mode.PLAYBACK }; log("回放中")
     waitFor(60.0, idle)
     val t = s.snapshot.tool!!
