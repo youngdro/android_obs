@@ -154,11 +154,13 @@ fun main() {
 
     // 5. 大臂/手腕避让（arm2 实测包络；大臂限位放宽到 ~−90° 以覆盖包络的突变段）
     val env = WristEnvelope.A003_ARM2
-    check("包络插值", env.minWrist(0.0) == null && abs(Math.toDegrees(env.minWrist(Math.toRadians(-30.9))!!) - 15.0) < 0.01 &&
-        abs(Math.toDegrees(env.minWrist(Math.toRadians(-200.0))!!) - 60.9) < 0.01)
-    check("包络 JSON 往返", ArmCalibration.fromJson(ArmCalibration.A003_ARM2.toJson()).wristEnvelope?.minWrist(-0.6)?.let { abs(it - env.minWrist(-0.6)!!) < 1e-9 } == true)
+    fun pose(j2: Double, j3: Double) = doubleArrayOf(0.0, Math.toRadians(j2), Math.toRadians(j3), 0.0, 0.0, 0.0)
+    check("包络插值", env.minWrist(pose(0.0, -40.0)) == null && abs(Math.toDegrees(env.minWrist(pose(-30.9, -40.0))!!) - 15.0) < 0.01 &&
+        abs(Math.toDegrees(env.minWrist(pose(-150.0, -40.0))!!) - 60.9) < 0.01 && abs(Math.toDegrees(env.minWrist(pose(0.0, 0.0))!!) - 10.0) < 0.01)
+    check("包络 JSON 往返", ArmCalibration.fromJson(ArmCalibration.A003_ARM2.toJson()).wristEnvelope?.minWrist(pose(-35.0, -5.0))?.let { abs(it - env.minWrist(pose(-35.0, -5.0))!!) < 1e-9 } == true)
     val cal2 = ArmCalibration.A003_ARM2.let { c -> c.copy(joints = c.joints.mapIndexed { i, j -> if (i == 1) j.copy(minTick = 2000) else j }) }
-    val start2 = cal2.joints.associate { it.servoId to it.zeroTick } + (7 to cal2.gripper!!.closedTick)
+    // 实机收拢时手腕在零位附近；这里从手腕已让开 10° 的“回零”姿态开始
+    val start2 = cal2.joints.associate { it.servoId to (if (it.servoId == 5) it.toTick(Math.toRadians(10.0)) else it.zeroTick) } + (7 to cal2.gripper!!.closedTick)
     val sim2 = SimBus(cal2.servoIds, start2)
     val arm2 = ArmController(StsBus(sim2, 5), cal2)
     arm2.enable()
@@ -169,7 +171,7 @@ fun main() {
         val dt = 0.02
         repeat((seconds / dt).toInt()) {
             arm2.tick(dt); sim2.step(dt)
-            val q = q2(); val m = env.minWrist(q[1]) ?: return@repeat
+            val q = q2(); val m = env.minWrist(q) ?: return@repeat
             worstGap = maxOf(worstGap, m - q[4])
         }
     }
@@ -182,19 +184,26 @@ fun main() {
     val end2 = q2()
     check("抬大臂前手腕先让开", !j2MovedBeforeClear, "0.6 秒时 J2 ${"%.1f".format(Math.toDegrees(early[1]))}° J5 ${"%.1f".format(Math.toDegrees(early[4]))}°")
     check("抬大臂全程手腕不进包络", worstGap < Math.toRadians(1.0), "最大侵入 ${"%.2f".format(Math.toDegrees(worstGap))}°")
-    check("大臂到位、手腕停在包络下限", abs(end2[1] - lift[1]) < 0.01 && abs(end2[4] - env.minWrist(lift[1])!!) < 0.02 &&
+    check("大臂到位、手腕停在包络下限", abs(end2[1] - lift[1]) < 0.01 && abs(end2[4] - env.minWrist(lift)!!) < 0.02 &&
         arm2.state.mode == ArmController.Mode.IDLE, "J2 ${"%.1f".format(Math.toDegrees(end2[1]))}° J5 ${"%.1f".format(Math.toDegrees(end2[4]))}°")
     arm2.moveTo(DoubleArray(6), durationS = 2.0); run2(6.0)
-    check("放下大臂后手腕回零", q2().all { abs(it) < 0.01 }, q2().joinToString { "%.2f".format(it) })
+    check("回零位：手腕停在小臂收拢需要的 10°", q2().withIndex().all { (i, v) -> abs(v - (if (i == 4) Math.toRadians(10.0) else 0.0)) < 0.01 } && worstGap < Math.toRadians(1.0),
+        q2().joinToString { "%.1f".format(Math.toDegrees(it)) })
+    // 小臂收拢：手腕在 0 时把小臂从 −60° 收回，手腕先让开
+    arm2.moveTo(doubleArrayOf(0.0, 0.0, Math.toRadians(-60.0), 0.0, 0.0, 0.0), durationS = 2.0); run2(4.0)
+    check("小臂抬起后手腕可以回 0", abs(q2()[4]) < 0.01 && abs(q2()[2] - Math.toRadians(-60.0)) < 0.01)
+    worstGap = 0.0
+    arm2.moveTo(DoubleArray(6), durationS = 2.0); run2(5.0)
+    check("小臂收拢全程手腕不进包络", worstGap < Math.toRadians(1.0) && abs(q2()[2]) < 0.01, "最大侵入 ${"%.2f".format(Math.toDegrees(worstGap))}°")
     // 遥控：手腕在 0 时往上推大臂，手腕自动转开，大臂等手腕
     worstGap = 0.0
     repeat(150) { arm2.jog(doubleArrayOf(0.0, -1.0, 0.0, 0.0, 0.0, 0.0)); arm2.tick(0.02); sim2.step(0.02)
-        val q = q2(); env.minWrist(q[1])?.let { worstGap = maxOf(worstGap, it - q[4]) } }
+        val q = q2(); env.minWrist(q)?.let { worstGap = maxOf(worstGap, it - q[4]) } }
     check("遥控抬大臂手腕自动让开", worstGap < Math.toRadians(1.0) && q2()[1] < Math.toRadians(-30.0),
         "J2 ${"%.1f".format(Math.toDegrees(q2()[1]))}° J5 ${"%.1f".format(Math.toDegrees(q2()[4]))}° 侵入 ${"%.2f".format(Math.toDegrees(worstGap))}°")
     run2(0.5)
     repeat(50) { arm2.jog(doubleArrayOf(0.0, 0.0, 0.0, 0.0, -1.0, 0.0)); arm2.tick(0.02); sim2.step(0.02) }
-    check("遥控手腕不能压进包络", q2()[4] >= env.minWrist(q2()[1])!! - 0.01)
+    check("遥控手腕不能压进包络", q2()[4] >= env.minWrist(q2())!! - 0.01)
     arm2.disable()
 
     println(if (failed == 0) "全部通过" else "$failed 项失败")

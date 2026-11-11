@@ -10,7 +10,7 @@ import kotlin.math.min
  * - 由调用方以固定周期（建议 50Hz）调用 [tick]；每次按当前轨迹算出设定点，夹进限位后一帧同步写给全部舵机。
  * - 只下发位置设定点，不下发速度：链路一断，舵机停在最后一个设定点，不会自己跑。
  * - 保护：限位、力矩上限、负载超限急停、跟随误差过大急停。急停 = 原地保持（不卸力，避免举着手机掉下来）。
- * - 大臂/手腕避让：标定里有 [WristEnvelope] 时，大臂抬起前手腕先让开，到位后再回到目标；遥控时手腕自动跟着让。
+ * - 大臂、小臂/手腕避让：标定里有 [WristEnvelope] 时，大臂抬起前手腕先让开，到位后再回到目标；遥控时手腕自动跟着让。
  *
  * 不是线程安全的：全部方法在同一个控制线程里调用。
  */
@@ -130,7 +130,7 @@ class ArmController(
     private fun planSegments(from: DoubleArray, target: DoubleArray): List<DoubleArray> {
         val env = cal.wristEnvelope ?: return listOf(target)
         if (n < 5) return listOf(target)
-        val need = env.maxAlong(from[1], target[1]) ?: return listOf(target)
+        val need = env.maxAlong(from, target) ?: return listOf(target)
         if (need <= from[4] + 1e-6 && need <= target[4] + 1e-6) return listOf(target)
         val out = ArrayList<DoubleArray>()
         val clear = clampAll(doubleArrayOf(*from).also { it[4] = max(from[4], need) })
@@ -152,9 +152,9 @@ class ArmController(
         return true
     }
 
-    /** 关节 5 不低于关节 2 当前角度对应的包络下限。 */
+    /** 关节 5 不低于当前大臂/小臂角度对应的包络下限。 */
     private fun withEnvelope(q: DoubleArray): DoubleArray {
-        val m = cal.wristEnvelope?.minWrist(q[1]) ?: return q
+        val m = cal.wristEnvelope?.minWrist(q) ?: return q
         if (q[4] < m) { q[4] = m; clampAll(q) }
         return q
     }
@@ -218,11 +218,11 @@ class ArmController(
     private fun jogEnvelope(prev: DoubleArray, dtS: Double) {
         val env = cal.wristEnvelope ?: return
         if (n < 5) return
-        val need = env.minWrist(setpoint[1]) ?: return
+        val need = env.minWrist(setpoint) ?: return
         if (setpoint[4] >= need) return
         val step = config.jogVelRad * dtS
         setpoint[4] = min(need, max(setpoint[4], prev[4]) + step)
-        if (setpoint[4] < need) setpoint[1] = prev[1] // 手腕没让开前大臂原地等
+        if (setpoint[4] < need) { setpoint[1] = prev[1]; setpoint[2] = prev[2] } // 手腕没让开前大臂、小臂原地等
         setpoint = clampAll(setpoint)
     }
 
