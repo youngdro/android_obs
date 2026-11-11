@@ -91,8 +91,8 @@ data class ArmCalibration(val joints: List<JointCal>, val gripper: GripperCal?, 
         val A003_ARM2 = ArmCalibration(
             joints = listOf(
                 JointCal("joint1", 1, 2081, +1, 931, 3047),
-                // 手腕不让开时大臂只能抬约 43°（2535）；配合包络自动让开后可到 EEPROM 允许的更高处
-                JointCal("joint2", 2, 3020, +1, 2535, 3020),
+                // 大臂抬到约 90°（EEPROM 下限 1175）；超过约 10° 时由 WristEnvelope 让手腕自动让开
+                JointCal("joint2", 2, 3020, +1, 1996, 3020),
                 JointCal("joint3", 3, 3003, +1, 1108, 3002),
                 JointCal("joint4", 4, 2041, -1, 944, 2796),
                 JointCal("joint5", 5, 2984, -1, 562, 3023),
