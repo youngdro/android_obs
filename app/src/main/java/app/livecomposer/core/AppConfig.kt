@@ -110,6 +110,8 @@ data class AppConfig(
     var noiseSuppression: Boolean = true,
     /** 直播时省电：预览降帧、无操作自动调暗屏幕。推流画面不受影响。 */
     var powerSave: Boolean = true,
+    /** 直播中无操作自动调暗屏幕（默认关：调暗后看起来像息屏，容易误会）。 */
+    var autoDim: Boolean = false,
     /** 网页 / 视频的声音是否也在手机上播放（默认否：只进推流）。 */
     var monitorLocal: Boolean = false,
     /** 第二路推流（纯摄像头画面）：地址（加密保存）、是否带麦克风声音、分辨率、码率。 */
@@ -148,6 +150,7 @@ data class AppConfig(
                 c.cameraRotationFix = o.optInt("cameraRotationFix", 0)
                 c.noiseSuppression = o.optBoolean("noiseSuppression", true)
                 c.powerSave = o.optBoolean("powerSave", true)
+                c.autoDim = o.optBoolean("autoDim", false)
                 c.monitorLocal = o.optBoolean("monitorLocal", false)
                 c.camAudio = o.optBoolean("camAudio", true)
                 c.camResolution = runCatching { Resolution.valueOf(o.optString("camResolution")) }.getOrDefault(Resolution.P720)
@@ -219,7 +222,7 @@ data class AppConfig(
             put("useFullUrl", useFullUrl); put("serverUrl", serverUrl); put("zoom", zoom.toDouble())
             put("micMuted", micMuted); put("allowCleartextWeb", allowCleartextWeb); put("webCaptureGpu", webCaptureGpu)
             put("cameraRotationFix", cameraRotationFix); put("noiseSuppression", noiseSuppression)
-            put("powerSave", powerSave); put("monitorLocal", monitorLocal);
+            put("powerSave", powerSave); put("autoDim", autoDim); put("monitorLocal", monitorLocal);
             put("camAudio", camAudio); put("camResolution", camResolution.name); put("camBitrateKbps", camBitrateKbps); put("webCaptureFps", webCaptureFps)
             put("layers", JSONArray().apply { layers.forEach { put(it.toJson()) } })
         }

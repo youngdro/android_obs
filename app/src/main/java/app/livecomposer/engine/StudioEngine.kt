@@ -101,6 +101,7 @@ data class EngineState(
     /** 网页声音接管情况。 */
     val webAudio: String?,
     val powerSave: Boolean,
+    val autoDim: Boolean,
     val monitorLocal: Boolean,
     /** 第二路（纯摄像头）推流。 */
     val cam: CamStreamState,
@@ -209,7 +210,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
             zoom = config.zoom,
             zoomMin = if (ready) camera.zoomRange.lower else 1f, zoomMax = if (ready) camera.zoomRange.upper else 1f,
             syncTest = syncTest, noiseSuppression = config.noiseSuppression, webAudio = webAudio,
-            powerSave = config.powerSave, monitorLocal = config.monitorLocal,
+            powerSave = config.powerSave, autoDim = config.autoDim, monitorLocal = config.monitorLocal,
             cam = CamStreamState(stream2Active, stats2, stats2?.message ?: stream2EndMessage, config.camUrl, config.camAudio,
                 config.camResolution, config.camBitrateKbps), webCaptureFps = config.webCaptureFps, webGpu = config.webCaptureGpu, allowCleartext = config.allowCleartextWeb,
             cameraRotationFix = config.cameraRotationFix,

@@ -85,6 +85,7 @@ class StudioActivity : ComponentActivity() {
         root.addView(webParent, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         val compose = ComposeView(this)
         root.addView(compose, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        root.keepScreenOn = true // 与窗口标志双保险：直播中屏幕常亮
         setContentView(root)
 
         engine = StudioEngine(this, webParent)
@@ -211,10 +212,11 @@ class StudioActivity : ComponentActivity() {
 
     private fun maybeDim() {
         val s = state.value
-        if (initialized && started && engine.config.powerSave && s != null && (s.isStreaming || s.cam.active) && !dimmed) {
+        if (initialized && started && engine.config.autoDim && s != null && (s.isStreaming || s.cam.active) && !dimmed) {
             dimmed = true
-            window.attributes = window.attributes.apply { screenBrightness = 0.02f }
-            engine.notify("已调暗屏幕省电，直播不受影响；触摸屏幕恢复")
+            // 调到较暗但仍清晰可见的亮度（不是黑屏），避免被误认为息屏
+            window.attributes = window.attributes.apply { screenBrightness = DIM_LEVEL }
+            engine.notify("已调暗屏幕省电（不是息屏），直播不受影响；触摸屏幕恢复。可在设置里关闭")
         } else if (!dimmed) scheduleDim()
     }
 
@@ -245,7 +247,8 @@ class StudioActivity : ComponentActivity() {
     }
 
     companion object {
-        private const val DIM_AFTER_MS = 45_000L
+        private const val DIM_AFTER_MS = 60_000L
+        private const val DIM_LEVEL = 0.15f
     }
 
     override fun onDestroy() {
