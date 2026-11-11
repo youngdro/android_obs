@@ -72,6 +72,7 @@ fun main(args: Array<String>) {
         session.connect(ArmSession.SIM); Thread.sleep(300); session.enable(55); Thread.sleep(500)
         session.moveToPose(session.ik.forward(doubleArrayOf(0.5, -1.0, -1.6, 0.0, 1.2, 0.3)))
     }.apply { isDaemon = true }.start()
+    if (System.getenv("ARMAPP_SELFTEST") != null) Thread { selfTest(session) }.apply { isDaemon = true }.start()
     application {
         Window(
             onCloseRequest = { session.disconnect(); exitApplication() },
@@ -171,7 +172,7 @@ private fun ConnectionPanel(s: ArmSession, snap: ArmSession.Snapshot) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.weight(1f)) {
             OutlinedButton(onClick = { ports = listOf(ArmSession.SIM) + SerialLink.ports(); open = true }, Modifier.fillMaxWidth()) {
-                Text(port.substringAfterLast('/'), maxLines = 1)
+                Text((snap.link ?: port).substringAfterLast('/'), maxLines = 1)
             }
             DropdownMenu(open, { open = false }) {
                 ports.forEach { p -> DropdownMenuItem(text = { Text(p) }, onClick = { port = p; open = false }) }
@@ -343,3 +344,37 @@ private fun JointsPanel(s: ArmSession, snap: ArmSession.Snapshot) {
 
 private fun mm(v: Double) = "%5.0f".format(v * 1000)
 private fun deg(v: Double) = "%4.0f".format(Math.toDegrees(v))
+
+/** 自检脚本（ARMAPP_SELFTEST=1，只用模拟机械臂）：依次跑点动、回零、录制、回放，每步打印状态。 */
+private fun selfTest(s: ArmSession) {
+    fun log(step: String) {
+        val sn = s.snapshot; val t = sn.tool
+        println("[自检] $step | 模式 ${sn.state?.mode} 录制 ${sn.recordingState} 夹爪位置 " +
+            (t?.let { "%.0f %.0f %.0f mm".format(it.x * 1000, it.y * 1000, it.z * 1000) } ?: "-") + " | ${sn.message}")
+    }
+    fun waitFor(maxS: Double, cond: (ArmSession.Snapshot) -> Boolean): Boolean {
+        val end = System.nanoTime() + (maxS * 1e9).toLong()
+        while (System.nanoTime() < end) { if (cond(s.snapshot)) return true; Thread.sleep(50) }
+        return false
+    }
+    val idle = { sn: ArmSession.Snapshot -> sn.state?.mode == ArmController.Mode.IDLE }
+    s.connect(ArmSession.SIM); Thread.sleep(500); s.enable(55); Thread.sleep(500); log("上力")
+    s.home(); waitFor(20.0, idle); log("回零")
+    val z0 = s.snapshot.tool!!.z
+    s.heldToolFrame = false; s.heldToolJog = doubleArrayOf(0.0, 0.0, 0.03, 0.0, 0.0, 0.0); Thread.sleep(2000); s.heldToolJog = null
+    Thread.sleep(500); log("点动 Z+ 2 秒（应升高约 60 mm，实际 ${"%.0f".format((s.snapshot.tool!!.z - z0) * 1000)} mm）")
+    s.startRecording(false); waitFor(20.0) { it.recordingState == ArmSession.RecordingState.RECORDING }; log("开始录制")
+    s.heldToolJog = doubleArrayOf(0.03, 0.0, 0.0, 0.0, 0.0, 0.0); Thread.sleep(1500); s.heldToolJog = null
+    s.setGripper(0.6); Thread.sleep(1500)
+    s.heldJointJog = doubleArrayOf(0.5, 0.0, 0.0, 0.0, 0.0, 0.0); Thread.sleep(1000); s.heldJointJog = null
+    Thread.sleep(500); val endPose = s.snapshot.tool; log("录制中动作完成")
+    s.stopRecording("自检"); Thread.sleep(500); log("结束录制，共 ${s.snapshot.recordings.size} 条")
+    s.home(); waitFor(20.0, idle); log("回零")
+    s.play("自检", 1.0)
+    waitFor(10.0) { it.state?.mode == ArmController.Mode.PLAYBACK }; log("回放中")
+    waitFor(60.0, idle)
+    val t = s.snapshot.tool!!
+    val d = endPose?.let { e -> Math.sqrt((t.x - e.x) * (t.x - e.x) + (t.y - e.y) * (t.y - e.y) + (t.z - e.z) * (t.z - e.z)) * 1000 }
+    log("回放结束，终点与录制终点相差 ${"%.1f".format(d)} mm，夹爪 ${s.snapshot.state?.gripper?.let { "%.2f".format(it) }}")
+    println("[自检] 完成")
+}

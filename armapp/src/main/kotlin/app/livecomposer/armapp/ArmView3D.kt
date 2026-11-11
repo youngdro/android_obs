@@ -54,8 +54,9 @@ fun ArmView3D(
                 zoom = (zoom * (if (dy > 0) 0.9 else 1.1)).coerceIn(0.3, 5.0)
             },
     ) {
-        val scale = size.minDimension * 1.6 * zoom
-        val center = Offset(size.width / 2, size.height * 0.68f)
+        // 机械臂伸直约 0.5 m 高：按窗口高度留出 0.65 m，底座放在下方 85% 处
+        val scale = minOf(size.height / 0.65, size.width / 0.7) * zoom
+        val center = Offset(size.width / 2, size.height * 0.85f)
         fun proj(p: DoubleArray): Offset {
             val ca = cos(azimuth); val sa = sin(azimuth)
             val x1 = p[0] * ca - p[1] * sa
