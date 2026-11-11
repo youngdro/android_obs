@@ -56,6 +56,12 @@ fun main() {
     val pb = ConfigBundle.parse(bad.toString())
     check("跳过格式不对的图层和场景", pb.layerCount == 3 && pb.sceneCount == 1 && pb.warnings.any { it.contains("2 个图层格式不对") } && pb.warnings.any { it.contains("场景") }, pb.warnings.joinToString())
 
+    // 服务端实际下发的样式：scenes 为空数组、activeSceneId 为空字符串 → 清空本机场景
+    val srv = ConfigBundle.parse("""{"format":"livecomposer-config","version":1,"settings":{"visionLiveId":"123456789","layers":[{"id":"cloud-camera","type":"CAMERA","name":"后置摄像头","x":0,"y":0,"w":1080,"h":1920,"layouts":{}}]},
+        "secrets":{"fullUrl":"rtmp://push.example.com/live/s?auth_key=X","streamKey":"","camUrl":"","visionApiKey":"lc_evt_v1.X"},"scenes":[],"activeSceneId":""}""")
+    check("服务端样式：空 scenes 清空场景、空 activeSceneId 清除选择", srv.scenes != null && srv.sceneCount == 0 && srv.activeSceneId == null)
+    check("服务端样式：空字符串密钥表示清空", srv.secrets?.get("camUrl") == "" && srv.secrets?.get("visionApiKey") == "lc_evt_v1.X")
+
     fun err(t: String) = try { ConfigBundle.parse(t); null } catch (e: IllegalArgumentException) { e.message }
     check("拒绝非 JSON", err("hello")?.contains("JSON") == true)
     check("拒绝其他格式", err("""{"format":"obs-scene","version":1,"settings":{}}""")?.contains("不是 LiveComposer") == true)
@@ -82,10 +88,22 @@ fun main() {
     check("云端：带 App 版本头", req?.getHeader("X-LiveComposer-Version") == "0.9.0")
     check("云端：解析成功", (r1 as? ConfigFetcher.Result.Ok)?.parsed?.layerCount == 3)
 
-    server.enqueue(MockResponse().setResponseCode(404).setBody("""{"ok":false,"code":"NOT_FOUND"}"""))
-    check("云端：404 提示没有该直播间的配置", (fetch(base) as? ConfigFetcher.Result.Fail)?.message?.contains("liveId") == true)
-    server.enqueue(MockResponse().setResponseCode(401))
-    check("云端：401 提示检查密钥", (fetch(base) as? ConfigFetcher.Result.Fail)?.message?.contains("令牌") == true)
+    server.enqueue(MockResponse().setResponseCode(404).setBody("""{"ok":false,"code":"CONFIG_NOT_FOUND","error":"x"}"""))
+    check("云端：404 CONFIG_NOT_FOUND 提示管理员保存", (fetch(base) as? ConfigFetcher.Result.Fail)?.message?.let { it.contains("CONFIG_NOT_FOUND") && it.contains("管理员") } == true)
+    server.enqueue(MockResponse().setResponseCode(404).setBody("""{"ok":false,"code":"SESSION_NOT_FOUND"}"""))
+    check("云端：404 SESSION_NOT_FOUND 提示关联直播间", (fetch(base) as? ConfigFetcher.Result.Fail)?.message?.contains("关联") == true)
+    server.enqueue(MockResponse().setResponseCode(401).setBody("""{"ok":false,"code":"UNAUTHORIZED","error":"配置访问密钥无效"}"""))
+    check("云端：401 提示检查配置访问密钥", (fetch(base) as? ConfigFetcher.Result.Fail)?.message?.contains("配置访问密钥") == true)
+    server.enqueue(MockResponse().setResponseCode(429).setHeader("Retry-After", "3").setBody("""{"ok":false,"code":"POLL_TOO_FAST"}"""))
+    check("云端：429 按 Retry-After 提示", (fetch(base) as? ConfigFetcher.Result.Fail)?.message?.contains("3 秒") == true)
+    server.enqueue(MockResponse().setResponseCode(503).setBody("""{"ok":false,"code":"BINDING_BUSY"}"""))
+    check("云端：503 提示暂不可用", (fetch(base) as? ConfigFetcher.Result.Fail)?.message?.contains("暂不可用") == true)
+    server.enqueue(MockResponse().setResponseCode(302).setHeader("Location", "https://evil.example.com/steal"))
+    val r302 = fetch(base)
+    check("云端：不跟随重定向（不把密钥带到别的域名）", (r302 as? ConfigFetcher.Result.Fail)?.message?.contains("重定向") == true && server.requestCount == 7, "requests=${server.requestCount}")
+    server.enqueue(MockResponse().setHeader("X-LiveComposer-Vision-Expires-At", "1794279810073").setHeader("X-LiveComposer-Config-Revision", "7").setBody(text))
+    val rh = fetch(base) as? ConfigFetcher.Result.Ok
+    check("云端：读取截图凭证有效期和修订号", rh?.visionExpiresAt == 1794279810073L && rh.revision == "7")
     server.enqueue(MockResponse().setBody("""{"hello":1}"""))
     check("云端：内容不是配置时给出原因", (fetch(base) as? ConfigFetcher.Result.Fail)?.message?.contains("不是 LiveComposer") == true)
     server.enqueue(MockResponse().setBody(" ".repeat(ConfigBundle.MAX_BYTES + 10)))

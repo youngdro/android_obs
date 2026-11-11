@@ -131,6 +131,8 @@ data class AppConfig(
     /** 云端配置：接口地址、直播间 liveId、访问密钥（加密保存）。只属于本机，不随配置导出。 */
     var cloudConfigUrl: String = "",
     var cloudLiveId: String = "",
+    /** 云端下发的截图凭证失效时间（Unix 毫秒，0 = 未知）。只属于本机。 */
+    var visionKeyExpiresAt: Long = 0,
     var cloudConfigToken: String = "",
     val layers: MutableList<Layer> = mutableListOf(),
 ) {
@@ -223,7 +225,7 @@ data class AppConfig(
         put("camAudio", camAudio); put("camResolution", camResolution.name); put("camBitrateKbps", camBitrateKbps)
         put("visionBaseUrl", visionBaseUrl); put("visionLiveId", visionLiveId); put("visionEnabled", visionEnabled)
         put("webCaptureFps", webCaptureFps)
-        put("cloudConfigUrl", cloudConfigUrl); put("cloudLiveId", cloudLiveId)
+        put("cloudConfigUrl", cloudConfigUrl); put("cloudLiveId", cloudLiveId); put("visionKeyExpiresAt", visionKeyExpiresAt)
         put("layers", JSONArray().apply { layers.forEach { put(it.toJson()) } })
     }
 
@@ -254,6 +256,7 @@ data class AppConfig(
         webCaptureFps = o.optInt("webCaptureFps", webCaptureFps)
         if (o.has("cloudConfigUrl")) cloudConfigUrl = o.optString("cloudConfigUrl")
         if (o.has("cloudLiveId")) cloudLiveId = o.optString("cloudLiveId")
+        if (o.has("visionKeyExpiresAt")) visionKeyExpiresAt = o.optLong("visionKeyExpiresAt")
         o.optJSONArray("layers")?.let { arr ->
             layers.clear()
             for (i in 0 until arr.length()) runCatching { layers.add(Layer.fromJson(arr.getJSONObject(i))) }

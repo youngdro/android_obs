@@ -125,6 +125,9 @@ class StudioUi {
     var importPreview by mutableStateOf<ImportPreview?>(null)
     var cloudLoading by mutableStateOf(false)
     var cloudError by mutableStateOf<String?>(null)
+    /** 开播前填写 liveId 拉取云端配置的弹窗。 */
+    var goLivePrompt by mutableStateOf(false)
+    var goLiveError by mutableStateOf<String?>(null)
 }
 
 @Composable
@@ -145,11 +148,8 @@ fun StudioScreen(state: EngineState?, ui: StudioUi, cb: StudioCallbacks) {
 
         val goLive: () -> Unit = {
             if (state.isStreaming) ui.confirmStop = true
-            else {
-                val err = cb.validateUrl() ?: cb.onGoLive()
-                ui.urlError = err
-                if (err != null) ui.panel = Panel.SETTINGS
-            }
+            else if (state.cloud.token.isNotBlank() && !state.cam.active) { ui.goLiveError = null; ui.goLivePrompt = true } // 可选：先按 liveId 拉取云端配置
+            else startLiveDirect(ui, cb)
         }
 
         if (landscape) {
@@ -444,8 +444,44 @@ private fun PanelHost(state: EngineState, ui: StudioUi, cb: StudioCallbacks, lan
 
 // ---------------------------------------------------------------- 对话框
 
+private fun startLiveDirect(ui: StudioUi, cb: StudioCallbacks) {
+    val err = cb.validateUrl() ?: cb.onGoLive()
+    ui.urlError = err
+    if (err != null) ui.panel = Panel.SETTINGS
+}
+
 @Composable
 private fun Dialogs(state: EngineState, ui: StudioUi, cb: StudioCallbacks) {
+    if (ui.goLivePrompt) {
+        var liveId by remember { mutableStateOf(state.cloud.liveId) }
+        AlertDialog(
+            onDismissRequest = { if (!ui.cloudLoading) ui.goLivePrompt = false },
+            containerColor = Studio.SurfaceHigh,
+            title = { Text("开播", color = Studio.Text) },
+            text = {
+                Column {
+                    Text("可以先填这场直播的 liveId，从云端拉取推流地址、助播网页和截图凭证，加载后自动开播；也可以直接用现在的设置开播。",
+                        color = Studio.TextDim, fontSize = 13.sp)
+                    androidx.compose.foundation.layout.Spacer(Modifier.height(10.dp))
+                    Field("liveId（可选）", liveId, { liveId = it.trim() }, placeholder = "直播间 liveId",
+                        enabled = !ui.cloudLoading, onChange = { liveId = it.trim(); ui.goLiveError = null })
+                    if (ui.cloudLoading) Text("正在拉取配置…", color = Studio.Warn, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
+                    ui.goLiveError?.let { Text("$it\n可以检查后重试，或直接开播（使用现在的设置）。", color = Studio.Live, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp)) }
+                }
+            },
+            confirmButton = {
+                TextButton({ cb.config.onPullAndGoLive(liveId) }, enabled = liveId.isNotBlank() && !ui.cloudLoading) {
+                    Text("拉取配置并开播", color = if (liveId.isNotBlank() && !ui.cloudLoading) Studio.Accent else Studio.TextFaint, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton({ ui.goLivePrompt = false }, enabled = !ui.cloudLoading) { Text("取消", color = Studio.TextDim) }
+                    TextButton({ ui.goLivePrompt = false; startLiveDirect(ui, cb) }, enabled = !ui.cloudLoading) { Text("直接开播", color = Studio.Text) }
+                }
+            },
+        )
+    }
     if (ui.confirmStop) {
         AlertDialog(
             onDismissRequest = { ui.confirmStop = false },

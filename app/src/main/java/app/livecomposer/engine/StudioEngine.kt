@@ -65,6 +65,8 @@ data class VisionState(
     val apiKey: String,
     val deviceId: String,
     val enabled: Boolean,
+    /** 截图凭证失效时间（Unix 毫秒，0 = 未知）。 */
+    val keyExpiresAt: Long = 0,
 )
 
 /** 第二路（纯摄像头）推流的状态与设置。 */
@@ -157,6 +159,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
     var onChanged: (() -> Unit)? = null
     /** 加载整体配置后需要整体重建（由 Activity 重建自己）。 */
     var onRestartRequested: (() -> Unit)? = null
+    val isReady: Boolean get() = ready
 
     val config: AppConfig = AppConfig.load(activity)
     private val sceneStore = SceneStore(activity)
@@ -237,8 +240,8 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
             zoomMin = if (ready) camera.zoomRange.lower else 1f, zoomMax = if (ready) camera.zoomRange.upper else 1f,
             syncTest = syncTest, noiseSuppression = config.noiseSuppression, webAudio = webAudio,
             powerSave = config.powerSave, autoDim = config.autoDim, monitorLocal = config.monitorLocal,
-            vision = VisionState(visionStatus, config.visionBaseUrl, config.visionLiveId, config.visionApiKey, config.deviceId, config.visionEnabled),
-            cloud = CloudConfigState(config.cloudConfigUrl, config.cloudLiveId.ifEmpty { config.visionLiveId }, config.cloudConfigToken),
+            vision = VisionState(visionStatus, config.visionBaseUrl, config.visionLiveId, config.visionApiKey, config.deviceId, config.visionEnabled, config.visionKeyExpiresAt),
+            cloud = CloudConfigState(config.cloudConfigUrl.ifBlank { ConfigFetcher.DEFAULT_URL }, config.cloudLiveId.ifEmpty { config.visionLiveId }, config.cloudConfigToken),
             cam = CamStreamState(stream2Active, stats2, stats2?.message ?: stream2EndMessage, config.camUrl, config.camAudio,
                 config.camResolution, config.camBitrateKbps), webCaptureFps = config.webCaptureFps, webGpu = config.webCaptureGpu, allowCleartext = config.allowCleartextWeb,
             cameraRotationFix = config.cameraRotationFix,
@@ -843,7 +846,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
     /** 从云端获取配置（结果回到主线程）。 */
     fun fetchCloudConfig(callback: (ConfigFetcher.Result) -> Unit) {
         if (config.cloudLiveId.isBlank() && config.visionLiveId.isNotBlank()) config.cloudLiveId = config.visionLiveId
-        configFetcher.fetch(config.cloudConfigUrl, config.cloudLiveId, config.cloudConfigToken, appVersion(), config.deviceId) { r ->
+        configFetcher.fetch(config.cloudConfigUrl.ifBlank { ConfigFetcher.DEFAULT_URL }, config.cloudLiveId, config.cloudConfigToken, appVersion(), config.deviceId) { r ->
             main.post {
                 // 云端配置没写截图通道的 liveId 时，用查询时的 liveId
                 if (r is ConfigFetcher.Result.Ok && !r.parsed.settings.has("visionLiveId") && config.cloudLiveId.isNotBlank()) {
@@ -858,7 +861,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
      * 应用一份整体配置：替换设置、图层、场景（以及配置里带的密钥），保存后整体重建。
      * 本机设备 ID、云端配置地址不变。返回错误信息或 null。
      */
-    fun applyConfig(p: ConfigBundle.Parsed): String? {
+    fun applyConfig(p: ConfigBundle.Parsed, visionExpiresAt: Long = 0): String? {
         configLockedReason()?.let { return it }
         if (ready) vision.stop()
         config.applySettingsJson(p.settings)
@@ -866,7 +869,7 @@ class StudioEngine(private val activity: Activity, private val webParent: ViewGr
             s["fullUrl"]?.let { config.fullUrl = it; if (it.isNotEmpty() && !p.settings.has("useFullUrl")) config.useFullUrl = true }
             s["streamKey"]?.let { config.streamKey = it }
             s["camUrl"]?.let { config.camUrl = it }
-            s["visionApiKey"]?.let { config.visionApiKey = it }
+            s["visionApiKey"]?.let { if (it != config.visionApiKey || visionExpiresAt > 0) config.visionKeyExpiresAt = visionExpiresAt; config.visionApiKey = it }
         }
         if (config.resolution !in availableResolutions()) config.resolution = availableResolutions().last()
         if (config.camResolution !in availableResolutions()) config.camResolution = Resolution.P720

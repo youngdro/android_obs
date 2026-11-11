@@ -28,7 +28,7 @@ object ConfigBundle {
     const val MAX_BYTES = 2 * 1024 * 1024
     val SECRET_KEYS = listOf("fullUrl", "streamKey", "camUrl", "visionApiKey")
     /** 只属于本机、不随配置迁移的设置。 */
-    private val LOCAL_ONLY = setOf("deviceId", "cloudConfigUrl", "cloudConfigToken", "cloudLiveId")
+    private val LOCAL_ONLY = setOf("deviceId", "cloudConfigUrl", "cloudConfigToken", "cloudLiveId", "visionKeyExpiresAt")
 
     fun build(
         settings: JSONObject,
