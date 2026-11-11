@@ -13,6 +13,8 @@ sourceSets {
         // 助播截图通道的协议客户端（纯 JVM 部分），截图实现依赖 Android，排除
         kotlin.srcDir("../app/src/main/java/app/livecomposer/vision")
         kotlin.srcDir("../app/src/main/java/app/livecomposer/core")
+        // 机械臂控制核心（纯 Kotlin）
+        kotlin.srcDir("../app/src/main/java/app/livecomposer/arm")
         kotlin.exclude("**/AppConfig.kt", "**/Scenes.kt")
         kotlin.exclude("**/CameraFrameGrabber.kt")
         kotlin.srcDir("src/e2e/kotlin")
@@ -85,5 +87,13 @@ tasks.register<JavaExec>("configChecks") {
     description = "整体配置导出 / 加载格式与云端获取"
     classpath = sourceSets["main"].runtimeClasspath
     mainClass.set("ConfigChecksKt")
+    jvmArgs("-Dstdout.encoding=UTF-8", "-Dfile.encoding=UTF-8")
+}
+
+tasks.register<JavaExec>("armChecks") {
+    group = "verification"
+    description = "机械臂控制核心：舵机协议、标定换算、正运动学、同步轨迹、限位、遥控超时、负载/卡住保护（模拟总线）"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("ArmChecksKt")
     jvmArgs("-Dstdout.encoding=UTF-8", "-Dfile.encoding=UTF-8")
 }
