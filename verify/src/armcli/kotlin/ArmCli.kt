@@ -100,14 +100,15 @@ fun main(args: Array<String>) {
             try {
                 when (p.firstOrNull()) {
                     null -> {}
-                    "help" -> println("status / on [力矩%] / off / move a1..a6 [秒] / joint i 角度 [秒] / grip 0..1 / home [秒] / level on|off / jog i 比例 秒 / rec 名称 / key [秒] [停留] / save / play 名称 / list / stop / quit")
+                    "help" -> println("status / on [力矩%] / off / move a1..a6 [秒] / joint i 角度 [秒] / grip 0..1 / home [秒] / level on|off / jog i 比例 秒 / rec 名称 / key [秒] [停留] / save / play 名称 [放慢倍数] / list / stop / quit")
                     "status" -> {
                         if (arm.state.mode == ArmController.Mode.OFF && !arm.readPose()) println("读位置失败：舵机无应答，检查供电和串口")
                         else arm.state.let { s -> println("模式 ${s.mode}${s.fault?.let { "（$it）" } ?: ""}  关节 ${s.q.joinToString(" ") { deg(it) }}  夹爪 ${s.gripper?.let { "%.2f".format(it) }}  负载 ${s.loads.joinToString(" ")}") }
                     }
                     "on" -> {
                         val pct = p.getOrNull(1)?.toInt() ?: 40
-                        cfg = cfg.copy(torqueLimitPermille = pct * 10)
+                        // 负载急停阈值随力矩上限走：力矩上限之下留 50 的余量（不低于 400）
+                        cfg = cfg.copy(torqueLimitPermille = pct * 10, abortLoad = maxOf(400, pct * 10 - 50))
                         arm = ArmController(bus, cal, cfg) { println("[arm] $it") }
                         println(if (arm.enable()) "已上力（力矩上限 $pct%）" else "上力失败：${arm.state.fault}")
                     }
@@ -139,7 +140,11 @@ fun main(args: Array<String>) {
                     } ?: println("先 rec 名称")
                     "save" -> recording?.let { (n, frames) -> presets[n] = Preset(n, frames.toList()); savePresets(); recording = null; println("已保存 $n（${frames.size} 帧）到 $presetFile") }
                     "list" -> println(presets.keys.joinToString().ifEmpty { "（没有预设）" })
-                    "play" -> presets[p[1]]?.let { arm.play(it) } ?: println("没有预设 ${p[1]}")
+                    "play" -> presets[p[1]]?.let { pr ->
+                        // play 名称 [放慢倍数]：每帧过渡时间乘以倍数
+                        val k = p.getOrNull(2)?.toDouble() ?: 1.0
+                        arm.play(pr.copy(frames = pr.frames.map { it.copy(durationS = it.durationS * k) }))
+                    } ?: println("没有预设 ${p[1]}")
                     "stop" -> { jogLeft = 0.0; arm.stop() }
                     "clear" -> arm.clearFault()
                     "quit" -> running = false
