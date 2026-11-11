@@ -114,6 +114,10 @@ class StreamController(
         }
     }
 
+    /** 系统网络恢复 / 断开（由 Activity 的网络监听转发）。 */
+    fun onNetworkAvailable() { publisher?.reconnectNow() }
+    fun onNetworkLost() { publisher?.dropConnection() }
+
     fun stop(error: String? = null) {
         val pub = publisher ?: return
         publisher = null
