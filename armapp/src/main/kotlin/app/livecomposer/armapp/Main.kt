@@ -288,7 +288,12 @@ fun HoldButton(label: String, modifier: Modifier = Modifier, onHold: (Boolean) -
 @Composable
 private fun GripperPanel(s: ArmSession, snap: ArmSession.Snapshot) {
     var g by remember { mutableStateOf(0f) }
+    var force by remember { mutableStateOf(s.gripperForcePct.toFloat()) }
     Text("夹爪开合  ${snap.state?.gripper?.let { "%.0f%%".format(it * 100) } ?: "—"}", fontWeight = FontWeight.Bold)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("夹持力度 ${force.toInt()}%", Modifier.width(110.dp), fontSize = 13.sp)
+        Slider(force, { force = it }, onValueChangeFinished = { s.setGripperForce(force.toInt()) }, valueRange = 10f..80f, modifier = Modifier.weight(1f))
+    }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text("合", fontSize = 13.sp)
         Slider(g, { g = it }, onValueChangeFinished = { s.setGripper(g.toDouble()) }, modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
@@ -301,6 +306,7 @@ private fun RecordingPanel(s: ArmSession, snap: ArmSession.Snapshot) {
     var name by remember { mutableStateOf("") }
     var byHand by remember { mutableStateOf(false) }
     var speed by remember { mutableStateOf(1f) }
+    var holdGrip by remember { mutableStateOf(true) }
     Text("轨迹录制", fontWeight = FontWeight.Bold)
     when (snap.recordingState) {
         ArmSession.RecordingState.IDLE -> {
@@ -321,12 +327,16 @@ private fun RecordingPanel(s: ArmSession, snap: ArmSession.Snapshot) {
         Text("回放速度 ×${"%.1f".format(speed)}", Modifier.width(110.dp), fontSize = 13.sp)
         Slider(speed, { speed = it }, valueRange = 0.25f..2f, modifier = Modifier.weight(1f))
     }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(holdGrip, { holdGrip = it })
+        Text("回放时夹爪保持当前夹持（拿着手机时勾上）", fontSize = 13.sp)
+    }
     snap.state?.playbackProgress?.let { LinearProgressIndicator(progress = { it.toFloat() }, modifier = Modifier.fillMaxWidth()) }
     if (snap.recordings.isEmpty()) Text("还没有录制的轨迹", fontSize = 13.sp, color = Color.Gray)
     snap.recordings.forEach { r ->
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("${r.name}  ${"%.1f".format(r.durationS)} 秒", Modifier.weight(1f), fontSize = 13.sp)
-            TextButton({ s.play(r.name, speed.toDouble()) }) { Text("播放") }
+            TextButton({ s.play(r.name, speed.toDouble(), holdGrip) }) { Text("播放") }
             TextButton({ s.deleteRecording(r.name) }) { Text("删除", color = Color(0xFFE5484D)) }
         }
     }
@@ -382,7 +392,7 @@ private fun selfTest(s: ArmSession) {
     Thread.sleep(500); val endPose = s.snapshot.tool; log("录制中动作完成")
     s.stopRecording("自检"); Thread.sleep(500); log("结束录制，共 ${s.snapshot.recordings.size} 条")
     s.home(); waitMove(20.0); log("回零")
-    s.play("自检", 1.0)
+    s.play("自检", 1.0, false)
     waitFor(10.0) { it.state?.mode == ArmController.Mode.PLAYBACK }; log("回放中")
     waitFor(60.0, idle)
     val t = s.snapshot.tool!!

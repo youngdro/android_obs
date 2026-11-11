@@ -23,6 +23,8 @@ class ArmController(
 ) {
     data class Config(
         val torqueLimitPermille: Int = 400,
+        /** 夹爪的力矩上限 = 夹持力度（位置控制下夹住物体时就以这个力顶着）。为空时与关节相同。 */
+        val gripperTorquePermille: Int? = null,
         /** 轨迹速度上限：实机上小臂展开收回 6 秒（≈0.9 rad/s 峰值）会跟不上，12 秒可以，取 0.5。 */
         val maxVelRad: Double = 0.5,
         val maxAccRad: Double = 1.0,
@@ -118,7 +120,10 @@ class ArmController(
         gripperSet = gripperMeasured
         // 先压力矩上限再写目标：写目标位置会让舵机自动开扭矩，顺序反了会短暂以全力矩保持。
         fun retry(f: () -> Boolean) = (1..3).any { f() }
-        for (id in cal.servoIds) if (!retry { bus.setTorqueLimit(id, config.torqueLimitPermille) }) return fail("舵机 $id 无应答（设力矩上限）")
+        for (id in cal.servoIds) {
+            val lim = if (id == cal.gripper?.servoId) gripperForce ?: config.gripperTorquePermille ?: config.torqueLimitPermille else config.torqueLimitPermille
+            if (!retry { bus.setTorqueLimit(id, lim) }) return fail("舵机 $id 无应答（设力矩上限）")
+        }
         bus.syncGoal(goals())
         for (id in cal.servoIds) if (!retry { bus.setTorque(id, true) }) return fail("舵机 $id 无应答（上力）")
         fault = null; mode = Mode.IDLE; log("已上力")
@@ -215,6 +220,15 @@ class ArmController(
         mode = if (toolVel.all { it == 0.0 }) Mode.IDLE else Mode.JOG_TOOL
     }
 
+    private var gripperForce: Int? = null
+
+    /** 夹持力度（千分比，夹爪舵机的力矩上限），上力时随时可调。 */
+    fun setGripperForce(permille: Int): Boolean {
+        val g = cal.gripper ?: return false
+        gripperForce = permille.coerceIn(50, 1000)
+        return mode == Mode.OFF || bus.setTorqueLimit(g.servoId, gripperForce!!)
+    }
+
     /** 夹爪开合 0..1，平滑过去（约 1 秒走完全程）。 */
     fun setGripper(open: Double) {
         if (mode == Mode.OFF || mode == Mode.FAULT || cal.gripper == null) return
@@ -235,7 +249,7 @@ class ArmController(
      * 回放连续轨迹：先慢速走到轨迹起点（避让照常），再按录制节奏回放。每个采样都夹进限位、套手腕包络，
      * 相邻采样之间关节变化超过速度上限的地方自动放慢。[speed] > 1 加快，< 1 放慢。
      */
-    fun playRecording(rec: Recording, speed: Double = 1.0): Boolean {
+    fun playRecording(rec: Recording, speed: Double = 1.0, holdGripper: Boolean = false): Boolean {
         if (mode == Mode.OFF || mode == Mode.FAULT || rec.samples.size < 2) return false
         val vmax = max(config.maxVelRad, config.jogVelRad)
         val pts = smooth(rec.samples).map { s -> s to withEnvelope(clampAll(s.copyOf(n))) }
@@ -248,11 +262,12 @@ class ArmController(
                 val d = (0 until n).maxOf { abs(q[it] - prev[it]) }
                 t += max(rec.periodS / speed, d / vmax)
             }
-            timed += t to (q + raw.copyOfRange(n, raw.size))
+            // holdGripper：夹爪保持当前夹持（例如拿着手机回放运镜），不跟录制走
+            timed += t to (if (holdGripper) q else q + raw.copyOfRange(n, raw.size))
         }
         val start = timed.first().second
         pendingPlayback = timed
-        val g = start.getOrNull(n)?.takeIf { !it.isNaN() }
+        val g = if (holdGripper) null else start.getOrNull(n)?.takeIf { !it.isNaN() }
         moveTo(start.copyOf(n), g)
         return true
     }
@@ -331,7 +346,12 @@ class ArmController(
             Mode.PLAYBACK -> playback?.let { pb ->
                 pbT += dtS
                 val k = pb.indexOfFirst { it.first >= pbT }
-                if (k < 0) { setpoint = withEnvelope(clampAll(pb.last().second.copyOf(n))); playback = null; mode = Mode.IDLE }
+                if (k < 0) {
+                    val last = pb.last().second
+                    setpoint = withEnvelope(clampAll(last.copyOf(n)))
+                    last.getOrNull(n)?.takeIf { !it.isNaN() }?.let { gripperSet = it }
+                    playback = null; mode = Mode.IDLE
+                }
                 else {
                     val (t1, b) = pb[k]; val (t0, a) = pb[max(0, k - 1)]
                     val u = if (t1 > t0) ((pbT - t0) / (t1 - t0)).coerceIn(0.0, 1.0) else 1.0

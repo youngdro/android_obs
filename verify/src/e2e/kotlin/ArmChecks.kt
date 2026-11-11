@@ -302,6 +302,11 @@ fun main() {
     val endErr = (0 until 6).maxOf { abs(meas3()[it] - recEnd[it]) }
     check("回放到达录制终点", sawPlayback && endErr < 0.01 && arm3.state.mode == ArmController.Mode.IDLE && abs((arm3.state.gripper ?: 0.0) - 0.8) < 0.02,
         "终点误差 ${"%.4f".format(endErr)} rad，夹爪 ${arm3.state.gripper}")
+    // 回放时保持夹持：夹爪停在当前值，不跟录制走
+    arm3.setGripper(0.3); run3(2.0)
+    arm3.playRecording(recJson, holdGripper = true)
+    repeat(1500) { arm3.tick(0.02); sim3.step(0.02) }
+    check("回放时保持夹持", abs((arm3.state.gripper ?: 0.0) - 0.3) < 0.02, "夹爪 ${arm3.state.gripper}")
     // 卸力手掰录制：模拟用手把底座转 30°、大臂抬 20°
     arm3.moveTo(home); run3(15.0)
     arm3.disable()

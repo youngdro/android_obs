@@ -80,6 +80,7 @@ class ArmSession(val cal: ArmCalibration, private val dataDir: File) {
             if (old.state.mode != ArmController.Mode.OFF) old.stop()
             val a = ArmController(StsBus(l), cal, ArmController.Config(torqueLimitPermille = torquePct * 10, abortLoad = maxOf(400, torquePct * 10 - 50))) { say(it) }
             arm = a
+            a.setGripperForce(gripperForcePct * 10)
             if (a.enable()) say("已上力（力矩上限 $torquePct%）") else say("上力失败：${a.state.fault}")
         }
     }
@@ -120,10 +121,14 @@ class ArmSession(val cal: ArmCalibration, private val dataDir: File) {
         say("已保存「${r.name}」，${"%.1f".format(r.durationS)} 秒")
     }
 
-    fun play(name: String, speed: Double) = post { a ->
+    fun play(name: String, speed: Double, holdGripper: Boolean) = post { a ->
         val r = recordings.firstOrNull { it.name == name } ?: return@post
-        if (a.playRecording(r, speed)) say("回放「$name」：先回到起点") else say("回放需要先上力")
+        if (a.playRecording(r, speed, holdGripper)) say("回放「$name」：先回到起点" + if (holdGripper) "（夹爪保持当前夹持）" else "")
+        else say("回放需要先上力")
     }
+
+    @Volatile var gripperForcePct = 40; private set
+    fun setGripperForce(pct: Int) { gripperForcePct = pct; post { it.setGripperForce(pct * 10) } }
 
     fun deleteRecording(name: String) = post { recordings.removeAll { it.name == name }; saveRecordings() }
 
