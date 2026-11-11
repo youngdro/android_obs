@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>透明网页叠加测试</title>
+<!--
+  LiveComposer 固定测试网页（随项目交付）。覆盖：完全透明区域、半透明色块、渐变、阴影、中文文字、
+  透明 PNG / SVG、CSS 移动动画、Canvas 2D 动画、动态计数器、WebSocket / HTTP 数据更新、视口校准标记。
+
+  URL 参数（可选）：
+    ?ws=ws://192.168.1.10:8787     通过 WebSocket 接收数据（配合 tools/overlay-server.mjs）
+    ?poll=http://192.168.1.10:8787/data   每秒 HTTP 轮询 JSON
+  不带参数时使用本地模拟数据。
+-->
+<style>
+  /* 1. 透明背景：html 与 body 都不能有背景色 */
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  body {
+    width: 100vw; height: 100vh; position: relative;
+    font-family: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #fff;
+    color-scheme: only light; /* 不参与深色模式 */
+  }
+  .abs { position: absolute; }
+
+  /* 视口校准：四角 L 形标记 + 尺寸说明，接收端应看到完整的四个角 */
+  .corner { position: absolute; width: 4vmin; height: 4vmin; border: 0 solid #00e5ff; }
+  .tl { left: 0; top: 0; border-left-width: 6px; border-top-width: 6px; }
+  .tr { right: 0; top: 0; border-right-width: 6px; border-top-width: 6px; }
+  .bl { left: 0; bottom: 0; border-left-width: 6px; border-bottom-width: 6px; }
+  .br { right: 0; bottom: 0; border-right-width: 6px; border-bottom-width: 6px; }
+
+  .title {
+    left: 3vw; top: 3vh; font-size: 5vmin; font-weight: 800; letter-spacing: 0.05em;
+    text-shadow: 0 0.4vmin 1.2vmin rgba(0,0,0,0.85), 0 0 0.3vmin #000;
+  }
+  .sub { left: 3vw; top: calc(3vh + 7vmin); font-size: 2.4vmin; opacity: 0.95; text-shadow: 0 0 0.6vmin #000; }
+
+  /* 半透明 50% 色块 + 阴影 + 圆角抗锯齿边缘 */
+  .half {
+    right: 3vw; top: 3vh; width: 26vmin; height: 16vmin; border-radius: 2.5vmin;
+    background: rgba(0, 120, 255, 0.5);
+    box-shadow: 0 1vmin 3vmin rgba(0,0,0,0.6);
+    display: flex; align-items: center; justify-content: center; font-size: 3vmin; font-weight: 700;
+  }
+  /* 透明度阶梯：0/25/50/75/100% 白色 + 50% 红色，用于接收端取色核对 */
+  .ramp { right: 3vw; top: calc(3vh + 19vmin); display: flex; gap: 0.8vmin; }
+  .ramp div { width: 5vmin; height: 5vmin; font-size: 1.6vmin; color: #000; display: flex; align-items: flex-end; justify-content: center; }
+  /* 渐变：从不透明到全透明 */
+  .grad {
+    left: 0; right: 0; bottom: 0; height: 18vh;
+    background: linear-gradient(to top, rgba(10,10,30,0.85), rgba(10,10,30,0));
+  }
+  .ticker { left: 3vw; bottom: 4vh; font-size: 3.2vmin; font-weight: 700; text-shadow: 0 0 0.6vmin #000; }
+  .ticker small { font-size: 2vmin; font-weight: 400; opacity: 0.85; display: block; }
+
+  /* CSS 移动动画 */
+  .mover {
+    left: 0; top: 46vh; width: 12vmin; height: 12vmin; border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, #fff, #ff2d55 45%, rgba(255,45,85,0) 72%);
+    animation: move 6s ease-in-out infinite alternate;
+  }
+  @keyframes move { from { transform: translateX(2vw); } to { transform: translateX(calc(100vw - 14vmin)); } }
+  .spin { left: 3vw; top: 24vh; width: 14vmin; height: 14vmin; animation: spin 4s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .pulse { right: 4vw; bottom: 22vh; width: 18vmin; height: 18vmin; animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.25; transform: scale(0.85); } }
+
+  canvas { position: absolute; left: 30vw; top: 62vh; width: 40vw; height: 16vh; }
+  .canvasLabel { left: 30vw; top: calc(62vh - 3vmin); font-size: 2vmin; text-shadow: 0 0 0.5vmin #000; }
+</style>
+</head>
+<body>
+
+  <div class="abs title">透明网页叠加测试 · 中文渲染</div>
+  <div class="abs sub" id="vp">视口 -</div>
+
+  <div class="abs half">50% 半透明</div>
+  <div class="abs ramp">
+    <div style="background:rgba(255,255,255,0)">0</div>
+    <div style="background:rgba(255,255,255,.25)">25</div>
+    <div style="background:rgba(255,255,255,.5)">50</div>
+    <div style="background:rgba(255,255,255,.75)">75</div>
+    <div style="background:rgba(255,255,255,1)">100</div>
+    <div style="background:rgba(255,0,0,.5);color:#fff">R50</div>
+  </div>
+
+  <!-- 透明 PNG（径向透明渐变 + 抗锯齿描边） -->
+  <img class="abs spin" src="alpha-ring.png" alt="">
+  <!-- 透明 SVG -->
+  <svg class="abs pulse" viewBox="0 0 100 100">
+    <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7CFF6B" stop-opacity="1"/><stop offset="1" stop-color="#7CFF6B" stop-opacity="0"/>
+    </linearGradient></defs>
+    <polygon points="50,4 61,38 97,38 68,60 79,95 50,73 21,95 32,60 3,38 39,38" fill="url(#g)" stroke="#fff" stroke-width="2"/>
+  </svg>
+
+  <div class="abs mover"></div>
+
+  <div class="abs canvasLabel">Canvas 2D 动画</div>
+  <canvas id="cv" width="800" height="200"></canvas>
+
+  <div class="abs grad"></div>
+  <div class="abs ticker">
+    <span id="counter">计数 0</span>
+    <small id="data">数据源：本地模拟</small>
+  </div>
+
+  <!-- 四角标记放在最上层 -->
+  <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+
+<script>
+  // ---- 视口信息 ----
+  function showViewport() {
+    document.getElementById('vp').textContent =
+      '视口 ' + innerWidth + '×' + innerHeight + ' CSS px · DPR ' + devicePixelRatio.toFixed(2) + ' · 中间区域应完全透明';
+  }
+  showViewport(); addEventListener('resize', showViewport);
+
+  // ---- 动态计数器（每帧刷新，便于在接收端确认画面持续更新、估算帧率） ----
+  const t0 = performance.now();
+  let frames = 0;
+  function tick() {
+    frames++;
+    const s = (performance.now() - t0) / 1000;
+    document.getElementById('counter').textContent =
+      '计数 ' + frames + ' · ' + s.toFixed(1) + ' 秒 · ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    draw(s);
+    requestAnimationFrame(tick);
+  }
+
+  // ---- Canvas 2D：透明背景上的半透明小球与拖尾 ----
+  const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+  const balls = Array.from({ length: 6 }, (_, i) => ({ x: 60 + i * 120, y: 100, vx: 3 + i, vy: 2 + i * 0.7, hue: i * 60 }));
+  function draw(s) {
+    ctx.clearRect(0, 0, cv.width, cv.height); // 每帧清空为透明，不能 fillRect 底色
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.lineWidth = 3;
+    ctx.beginPath();
+    for (let x = 0; x <= cv.width; x += 8) ctx.lineTo(x, 100 + Math.sin(x / 50 + s * 3) * 60);
+    ctx.stroke();
+    for (const b of balls) {
+      b.x += b.vx; b.y += b.vy;
+      if (b.x < 20 || b.x > cv.width - 20) b.vx *= -1;
+      if (b.y < 20 || b.y > cv.height - 20) b.vy *= -1;
+      ctx.fillStyle = 'hsla(' + b.hue + ',100%,60%,0.5)';
+      ctx.beginPath(); ctx.arc(b.x, b.y, 20, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  requestAnimationFrame(tick);
+
+  // ---- 数据更新：WebSocket / HTTP 轮询 / 本地模拟 ----
+  const q = new URLSearchParams(location.search);
+  const dataEl = document.getElementById('data');
+  function show(obj, via) {
+    dataEl.textContent = '数据源：' + via + ' · ' + (obj.text || '') + (obj.value !== undefined ? ' · 值 ' + obj.value : '');
+  }
+  if (q.get('ws')) {
+    (function connect() {
+      const ws = new WebSocket(q.get('ws'));
+      ws.onopen = () => dataEl.textContent = '数据源：WebSocket 已连接';
+      ws.onmessage = e => { try { show(JSON.parse(e.data), 'WebSocket'); } catch (_) { dataEl.textContent = 'WebSocket：' + e.data; } };
+      ws.onclose = () => { dataEl.textContent = '数据源：WebSocket 断开，2 秒后重连'; setTimeout(connect, 2000); };
+    })();
+  } else if (q.get('poll')) {
+    setInterval(() => fetch(q.get('poll'), { cache: 'no-store' }).then(r => r.json())
+      .then(o => show(o, 'HTTP')).catch(e => dataEl.textContent = '数据源：HTTP 失败 ' + e.message), 1000);
+  } else {
+    let v = 0;
+    setInterval(() => show({ text: '本地模拟数据', value: ++v }, '本地'), 1000);
+  }
+</script>
+</body>
+</html>
