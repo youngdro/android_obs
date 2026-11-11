@@ -12,16 +12,29 @@ android {
         applicationId = "app.livecomposer"
         minSdk = 29          // Android 10 及以上
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.7.1"
+        versionCode = 13
+        versionName = "0.8.2"
+    }
+
+    // 固定的开发签名（仓库内提交，非正式发布密钥）：CI 每次打包签名一致，新版本可以直接覆盖安装、保留配置
+    signingConfigs {
+        create("dev") {
+            storeFile = file("livecomposer-dev.keystore")
+            storePassword = "android"
+            keyAlias = "livecomposer"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("dev")
+        }
         release {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
-            // 正式发布时替换为自己的签名配置；当前 release 用 debug 签名，便于直接安装验证
-            signingConfig = signingConfigs.getByName("debug")
+            // 正式发布时替换为自己的签名配置；当前用仓库内的开发签名，便于直接安装验证
+            signingConfig = signingConfigs.getByName("dev")
         }
     }
 
@@ -55,4 +68,6 @@ dependencies {
     implementation("androidx.media3:media3-datasource-rtmp:$media3")
     // 网页音频桥：在页面脚本之前注入（DOCUMENT_START_SCRIPT）
     implementation("androidx.webkit:webkit:1.12.1")
+    // 助播截图通道：HTTPS 发现接口 + WebSocket
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }

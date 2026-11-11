@@ -119,6 +119,13 @@ data class AppConfig(
     var camAudio: Boolean = true,
     var camResolution: Resolution = Resolution.P720,
     var camBitrateKbps: Int = 2500,
+    /** 助播截图通道：服务域名、直播间 liveId、设备接入密钥（加密保存）、是否在打开 App 时自动连接。 */
+    var visionBaseUrl: String = "https://pre-live.hemaos.com",
+    var visionLiveId: String = "",
+    var visionApiKey: String = "",
+    var visionEnabled: Boolean = false,
+    /** 本机固定设备 ID（首次运行生成，之后不变）。 */
+    var deviceId: String = "",
     /** 网页采集帧率，0 = 跟随输出帧率。 */
     var webCaptureFps: Int = 0,
     val layers: MutableList<Layer> = mutableListOf(),
@@ -133,6 +140,7 @@ data class AppConfig(
         fun load(ctx: Context): AppConfig {
             val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val c = AppConfig()
+            c.deviceId = deviceId(p)
             val json = p.getString("json", null) ?: return c.withDefaults(firstRun = true)
             try {
                 val o = JSONObject(json)
@@ -155,6 +163,9 @@ data class AppConfig(
                 c.camAudio = o.optBoolean("camAudio", true)
                 c.camResolution = runCatching { Resolution.valueOf(o.optString("camResolution")) }.getOrDefault(Resolution.P720)
                 c.camBitrateKbps = o.optInt("camBitrateKbps", 2500)
+                c.visionBaseUrl = o.optString("visionBaseUrl", c.visionBaseUrl).ifBlank { "https://pre-live.hemaos.com" }
+                c.visionLiveId = o.optString("visionLiveId", "")
+                c.visionEnabled = o.optBoolean("visionEnabled", false)
                 c.webCaptureFps = o.optInt("webCaptureFps", 0)
                 val arr = o.optJSONArray("layers") ?: JSONArray()
                 for (i in 0 until arr.length()) c.layers.add(Layer.fromJson(arr.getJSONObject(i)))
@@ -163,8 +174,17 @@ data class AppConfig(
             // 完整 URL 中也包含密钥，同样加密保存
             c.fullUrl = decrypt(p.getString("fullUrlEnc", null)) ?: ""
             c.camUrl = decrypt(p.getString("camUrlEnc", null)) ?: ""
+            c.visionApiKey = decrypt(p.getString("visionApiKeyEnc", null)) ?: ""
             c.streamKey = decrypt(p.getString("streamKeyEnc", null)) ?: ""
             return c.withDefaults(firstRun = false)
+        }
+
+        /** 本机固定设备 ID：首次生成后单独保存，不随配置重置而变化（卸载重装才会变）。 */
+        private fun deviceId(p: android.content.SharedPreferences): String {
+            p.getString("deviceId", null)?.takeIf { it.isNotBlank() }?.let { return it }
+            val id = "lc-" + java.util.UUID.randomUUID().toString()
+            p.edit().putString("deviceId", id).apply()
+            return id
         }
 
         private fun decrypt(s: String?): String? {
@@ -223,13 +243,15 @@ data class AppConfig(
             put("micMuted", micMuted); put("allowCleartextWeb", allowCleartextWeb); put("webCaptureGpu", webCaptureGpu)
             put("cameraRotationFix", cameraRotationFix); put("noiseSuppression", noiseSuppression)
             put("powerSave", powerSave); put("autoDim", autoDim); put("monitorLocal", monitorLocal);
-            put("camAudio", camAudio); put("camResolution", camResolution.name); put("camBitrateKbps", camBitrateKbps); put("webCaptureFps", webCaptureFps)
+            put("camAudio", camAudio);
+            put("visionBaseUrl", visionBaseUrl); put("visionLiveId", visionLiveId); put("visionEnabled", visionEnabled); put("camResolution", camResolution.name); put("camBitrateKbps", camBitrateKbps); put("webCaptureFps", webCaptureFps)
             put("layers", JSONArray().apply { layers.forEach { put(it.toJson()) } })
         }
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString("json", o.toString())
             .putString("fullUrlEnc", try { encrypt(fullUrl) } catch (_: Exception) { "" })
             .putString("camUrlEnc", try { encrypt(camUrl) } catch (_: Exception) { "" })
+            .putString("visionApiKeyEnc", try { encrypt(visionApiKey) } catch (_: Exception) { "" })
             .putString("streamKeyEnc", try { encrypt(streamKey) } catch (_: Exception) { "" })
             .apply()
     }

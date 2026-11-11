@@ -10,6 +10,9 @@ sourceSets {
     main {
         kotlin.srcDir("../app/src/main/java/app/livecomposer/rtmp")
         kotlin.srcDir("../app/src/main/java/app/livecomposer/mix")
+        // 助播截图通道的协议客户端（纯 JVM 部分），截图实现依赖 Android，排除
+        kotlin.srcDir("../app/src/main/java/app/livecomposer/vision")
+        kotlin.exclude("**/CameraFrameGrabber.kt")
         kotlin.srcDir("src/e2e/kotlin")
     }
     // 2) 整个 App 的编译检查（Android 框架 API 来自 Robolectric 发布在 Maven Central 的 android-all）
@@ -25,8 +28,13 @@ sourceSets {
 }
 
 val androidAll = "org.robolectric:android-all:14-robolectric-10818077"
+val okhttp = "com.squareup.okhttp3:okhttp:4.12.0"
 dependencies {
     "androidCheckCompileOnly"(androidAll)
+    "androidCheckCompileOnly"(okhttp)
+    implementation(okhttp)
+    implementation("org.json:json:20240303")
+    implementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
 
 tasks.register<JavaExec>("rtmpE2E") {
@@ -59,4 +67,13 @@ tasks.register<JavaExec>("denoiseChecks") {
     classpath = sourceSets["main"].runtimeClasspath
     mainClass.set("DenoiseChecksKt")
     jvmArgs("-Dstdout.encoding=UTF-8", "-Dfile.encoding=UTF-8")
+}
+
+tasks.register<JavaExec>("visionE2E") {
+    group = "verification"
+    description = "助播截图通道：对接模拟服务端（发现、鉴权、心跳、截图请求与回传、错误与重连）"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("VisionE2EKt")
+    jvmArgs("-Dstdout.encoding=UTF-8", "-Dfile.encoding=UTF-8")
+    args = (project.findProperty("e2eArgs") as String? ?: "").split(" ").filter { it.isNotBlank() }
 }

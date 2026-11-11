@@ -174,6 +174,11 @@ class StudioActivity : ComponentActivity() {
                 onStop = { engine.stopCamStream() },
                 validate = { engine.validateCamUrl() },
             ),
+            vision = VisionActions(
+                onEdit = { edit -> engine.updateVision(edit) },
+                onConnect = { engine.connectVision() },
+                onDisconnect = { engine.disconnectVision() },
+            ),
         )
     }
 
