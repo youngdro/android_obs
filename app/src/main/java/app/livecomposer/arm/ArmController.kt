@@ -3,6 +3,7 @@ package app.livecomposer.arm
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
 /**
  * 机械臂控制核心：位置设定点流式控制。
@@ -37,7 +38,7 @@ class ArmController(
         val keepLevel: Boolean = false,
     )
 
-    enum class Mode { OFF, IDLE, MOVING, JOG, FAULT }
+    enum class Mode { OFF, IDLE, MOVING, JOG, JOG_TOOL, PLAYBACK, FAULT }
 
     data class State(
         val mode: Mode,
@@ -45,7 +46,17 @@ class ArmController(
         val gripper: Double?,
         val loads: IntArray,
         val fault: String? = null,
+        /** 设定点（下发给舵机的目标），界面画“目标姿态”用。 */
+        val setpoint: DoubleArray = q,
+        /** 空间点动时目标够不着（到了限位、包络或工作空间边缘）。 */
+        val toolBlocked: Boolean = false,
+        val recording: Boolean = false,
+        /** 回放进度 0..1，不在回放时为 null。 */
+        val playbackProgress: Double? = null,
     )
+
+    /** 逆运动学，和控制器用同一份标定（限位、手腕包络）。 */
+    val ik = ArmIk(cal)
 
     private val n = cal.joints.size
     private var mode = Mode.OFF
@@ -69,7 +80,26 @@ class ArmController(
     private var ticks = 0
     private var stuckS = 0.0
 
-    val state: State get() = State(mode, measured.copyOf(), gripperMeasured, loads.copyOf(), fault)
+    val state: State get() = State(
+        mode, measured.copyOf(), gripperMeasured, loads.copyOf(), fault, setpoint.copyOf(), toolBlocked, recorder != null,
+        playback?.let { (pbT / it.last().first).coerceIn(0.0, 1.0) },
+    )
+
+    // —— 空间点动 ——
+    private var toolVel = DoubleArray(6)
+    private var toolFrame = false
+    private var toolBlocked = false
+    private var toolTarget: Pair<DoubleArray, DoubleArray>? = null
+
+    // —— 夹爪单独开合 ——
+    private var gripperTarget: Double? = null
+
+    // —— 连续轨迹录制 / 回放 ——
+    private var recorder: MutableList<DoubleArray>? = null
+    private var recT = 0.0
+    private var playback: List<Pair<Double, DoubleArray>>? = null
+    private var pendingPlayback: List<Pair<Double, DoubleArray>>? = null
+    private var pbT = 0.0
 
     /** 读取全部舵机当前位置。卸力时也能用（示教录制）。 */
     fun readPose(): Boolean {
@@ -97,7 +127,7 @@ class ArmController(
 
     /** 卸力（机械臂会因重力下垂，调用方需确认已扶住）。 */
     fun disable() {
-        traj = null; queue.clear(); segments.clear(); jogVel.fill(0.0)
+        traj = null; queue.clear(); segments.clear(); jogVel.fill(0.0); toolVel.fill(0.0); playback = null; pendingPlayback = null; gripperTarget = null
         for (id in cal.servoIds) bus.setTorque(id, false)
         mode = Mode.OFF; log("已卸力")
     }
@@ -105,7 +135,7 @@ class ArmController(
     /** 急停：原地保持。 */
     fun stop(reason: String = "停止") {
         if (mode == Mode.OFF) return
-        traj = null; queue.clear(); segments.clear(); jogVel.fill(0.0)
+        traj = null; queue.clear(); segments.clear(); jogVel.fill(0.0); toolVel.fill(0.0); playback = null; pendingPlayback = null; gripperTarget = null
         if (readPose()) { setpoint = clampAll(measured.copyOf()); bus.syncGoal(goals()) }
         if (mode != Mode.FAULT) mode = Mode.IDLE
         log(reason)
@@ -161,6 +191,84 @@ class ArmController(
         return q
     }
 
+    /**
+     * 让夹爪移动到空间位姿：先求逆解，够得着才走（关节空间同步轨迹，避让照常生效）。返回逆解结果，没上力时返回 null。
+     */
+    fun moveToPose(target: ToolPose, gripper: Double? = null, durationS: Double? = null, requireReach: Boolean = true): ArmIk.Result? {
+        if (mode == Mode.OFF || mode == Mode.FAULT) return null
+        val r = ik.solveBest(target, setpoint)
+        if (r.reached || !requireReach) moveTo(r.q, gripper, durationS)
+        return r
+    }
+
+    /**
+     * 空间点动：[vel] = (vx, vy, vz 米/秒, wx, wy, wz 弧度/秒)，[inToolFrame] 为真时按夹爪自身坐标系
+     * （X = 指向，往前伸），否则按底座坐标系。持续调用；超过 [jogTimeoutS] 没更新就停。
+     */
+    fun jogTool(vel: DoubleArray, inToolFrame: Boolean = false) {
+        if (mode == Mode.OFF || mode == Mode.FAULT) return
+        traj = null; queue.clear(); segments.clear(); jogVel.fill(0.0); playback = null; pendingPlayback = null
+        if (mode != Mode.JOG_TOOL || toolFrame != inToolFrame) toolTarget = null
+        for (i in 0 until 6) toolVel[i] = vel[i]
+        toolFrame = inToolFrame
+        jogAge = 0.0
+        mode = if (toolVel.all { it == 0.0 }) Mode.IDLE else Mode.JOG_TOOL
+    }
+
+    /** 夹爪开合 0..1，平滑过去（约 1 秒走完全程）。 */
+    fun setGripper(open: Double) {
+        if (mode == Mode.OFF || mode == Mode.FAULT || cal.gripper == null) return
+        gripperTarget = open.coerceIn(0.0, 1.0)
+    }
+
+    /** 开始录制连续轨迹（上力时录设定点，卸力时录手掰的实际位置）。 */
+    fun startRecording() { recorder = mutableListOf(); recT = RECORD_PERIOD_S; record() }
+
+    /** 结束录制；少于 2 个采样返回 null。 */
+    fun stopRecording(name: String): Recording? {
+        val r = recorder ?: return null
+        recorder = null
+        return if (r.size < 2) null else Recording(name, RECORD_PERIOD_S, r.toList())
+    }
+
+    /**
+     * 回放连续轨迹：先慢速走到轨迹起点（避让照常），再按录制节奏回放。每个采样都夹进限位、套手腕包络，
+     * 相邻采样之间关节变化超过速度上限的地方自动放慢。[speed] > 1 加快，< 1 放慢。
+     */
+    fun playRecording(rec: Recording, speed: Double = 1.0): Boolean {
+        if (mode == Mode.OFF || mode == Mode.FAULT || rec.samples.size < 2) return false
+        val vmax = max(config.maxVelRad, config.jogVelRad)
+        val pts = smooth(rec.samples).map { s -> s to withEnvelope(clampAll(s.copyOf(n))) }
+        val timed = ArrayList<Pair<Double, DoubleArray>>()
+        var t = 0.0
+        for ((k, pair) in pts.withIndex()) {
+            val (raw, q) = pair
+            if (k > 0) {
+                val prev = timed.last().second
+                val d = (0 until n).maxOf { abs(q[it] - prev[it]) }
+                t += max(rec.periodS / speed, d / vmax)
+            }
+            timed += t to (q + raw.copyOfRange(n, raw.size))
+        }
+        val start = timed.first().second
+        pendingPlayback = timed
+        val g = start.getOrNull(n)?.takeIf { !it.isNaN() }
+        moveTo(start.copyOf(n), g)
+        return true
+    }
+
+    private fun smooth(s: List<DoubleArray>): List<DoubleArray> =
+        s.indices.map { i ->
+            val a = s[max(0, i - 1)]; val b = s[i]; val c = s[min(s.size - 1, i + 1)]
+            DoubleArray(b.size) { k -> if (b[k].isNaN()) b[k] else (a[k] + 2 * b[k] + c[k]) / 4 }
+        }
+
+    private fun record() {
+        val r = recorder ?: return
+        val g = (if (mode == Mode.OFF) gripperMeasured else gripperSet) ?: Double.NaN
+        r += (if (mode == Mode.OFF) measured else setpoint).copyOf() + g
+    }
+
     fun play(preset: Preset): Boolean {
         if (mode == Mode.OFF || mode == Mode.FAULT || preset.frames.isEmpty()) return false
         queue = ArrayDeque(preset.frames)
@@ -181,11 +289,19 @@ class ArmController(
 
     /** 控制周期。dtS 为距上次调用的秒数。 */
     fun tick(dtS: Double) {
+        if (recorder != null) {
+            recT += dtS
+            if (recT >= RECORD_PERIOD_S) {
+                recT -= RECORD_PERIOD_S
+                if (mode == Mode.OFF) readPose()
+                record()
+            }
+        }
         if (mode == Mode.OFF) return
         ticks++
         when (mode) {
             Mode.MOVING -> {
-                if (holdLeft > 0) { holdLeft -= dtS; if (holdLeft <= 0 && !nextFrame()) mode = Mode.IDLE }
+                if (holdLeft > 0) { holdLeft -= dtS; if (holdLeft <= 0 && !nextFrame()) finishMove() }
                 else traj?.let { tr ->
                     trajT += dtS
                     setpoint = clampAll(tr.at(trajT))
@@ -194,7 +310,7 @@ class ArmController(
                     trajGripper?.let { (a, b) -> gripperSet = a + (b - a) * (trajT / tr.durationS).coerceIn(0.0, 1.0) }
                     if (tr.done(trajT)) {
                         traj = null
-                        if (!startSegment()) { holdLeft = queueHold; if (holdLeft <= 0 && !nextFrame()) mode = Mode.IDLE }
+                        if (!startSegment()) { holdLeft = queueHold; if (holdLeft <= 0 && !nextFrame()) finishMove() }
                     }
                 }
             }
@@ -208,13 +324,70 @@ class ArmController(
                     jogEnvelope(prev, dtS)
                 }
             }
+            Mode.JOG_TOOL -> {
+                jogAge += dtS
+                if (jogAge > jogTimeoutS) { toolVel.fill(0.0); mode = Mode.IDLE } else jogToolStep(dtS)
+            }
+            Mode.PLAYBACK -> playback?.let { pb ->
+                pbT += dtS
+                val k = pb.indexOfFirst { it.first >= pbT }
+                if (k < 0) { setpoint = withEnvelope(clampAll(pb.last().second.copyOf(n))); playback = null; mode = Mode.IDLE }
+                else {
+                    val (t1, b) = pb[k]; val (t0, a) = pb[max(0, k - 1)]
+                    val u = if (t1 > t0) ((pbT - t0) / (t1 - t0)).coerceIn(0.0, 1.0) else 1.0
+                    setpoint = withEnvelope(clampAll(DoubleArray(n) { a[it] + (b[it] - a[it]) * u }))
+                    val ga = a.getOrNull(n); val gb = b.getOrNull(n)
+                    if (ga != null && gb != null && !ga.isNaN() && !gb.isNaN()) gripperSet = ga + (gb - ga) * u
+                }
+            }
             else -> {}
+        }
+        gripperTarget?.let { gt ->
+            if (trajGripper == null || mode != Mode.MOVING) {
+                val g = gripperSet ?: gt
+                val step = GRIPPER_SPEED * dtS
+                gripperSet = if (abs(gt - g) <= step) gt.also { gripperTarget = null } else g + step * Math.signum(gt - g)
+            }
         }
         bus.syncGoal(goals())
         if (ticks % config.monitorEvery == 0) monitor(dtS * config.monitorEvery)
     }
 
     private var queueHold = 0.0
+
+    private fun finishMove() {
+        val pb = pendingPlayback
+        if (pb != null) { pendingPlayback = null; playback = pb; pbT = 0.0; mode = Mode.PLAYBACK } else mode = Mode.IDLE
+    }
+
+    /** 空间点动一步：当前设定点的夹爪位姿按速度挪一点，逆解（从当前关节角出发）够得着才走，关节速度超限就按比例放慢。 */
+    private fun jogToolStep(dtS: Double) {
+        // 目标位姿单独积分，不每步从设定点重算，否则逆解每步的小残差会累积成“走不够”
+        val (p, r) = toolTarget ?: ik.fk(setpoint)
+        val dv = doubleArrayOf(toolVel[0] * dtS, toolVel[1] * dtS, toolVel[2] * dtS)
+        val dp = if (toolFrame) Rot.mulV(r, dv) else dv
+        val w = doubleArrayOf(toolVel[3] * dtS, toolVel[4] * dtS, toolVel[5] * dtS)
+        val th = sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2])
+        val rn = if (th < 1e-12) r else {
+            val dr = Rot.axisAngle(doubleArrayOf(w[0] / th, w[1] / th, w[2] / th), th)
+            if (toolFrame) Rot.mul(r, dr) else Rot.mul(dr, r)
+        }
+        val tp = doubleArrayOf(p[0] + dp[0], p[1] + dp[1], p[2] + dp[2])
+        val res = ik.solve(tp, rn, setpoint, maxIter = 30)
+        if (res.posErr > 0.0015 || res.rotErr > Math.toRadians(1.5)) { toolBlocked = true; toolTarget = ik.fk(setpoint); return }
+        toolBlocked = false
+        val step = (0 until n).maxOf { abs(res.q[it] - setpoint[it]) }
+        val limit = config.jogVelRad * 1.5 * dtS
+        if (step > limit) {
+            // 关节速度超限：按比例少走一点，目标拉回到实际能到的位置
+            val k = limit / step
+            setpoint = withEnvelope(clampAll(DoubleArray(n) { setpoint[it] + (res.q[it] - setpoint[it]) * k }))
+            toolTarget = ik.fk(setpoint)
+        } else {
+            setpoint = withEnvelope(clampAll(res.q.copyOf()))
+            toolTarget = tp to rn
+        }
+    }
 
     /** 遥控时的避让：大臂要抬到手腕还没让开的位置，就先停住大臂、手腕以遥控速度转开；手腕不能往下压进包络。 */
     private fun jogEnvelope(prev: DoubleArray, dtS: Double) {
@@ -267,5 +440,11 @@ class ArmController(
         val g = cal.gripper; val gs = gripperSet
         if (g != null && gs != null) m[g.servoId] = g.toTick(gs)
         return m
+    }
+
+    companion object {
+        const val RECORD_PERIOD_S = 0.05
+        /** 夹爪开合速度（全程/秒）。 */
+        const val GRIPPER_SPEED = 1.0
     }
 }

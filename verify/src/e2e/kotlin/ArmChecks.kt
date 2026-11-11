@@ -1,6 +1,7 @@
 import app.livecomposer.arm.*
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.sqrt
 import kotlin.system.exitProcess
 
 /**
@@ -62,8 +63,8 @@ class SimBus(ids: List<Int>, start: Map<Int, Int>) : ArmLink {
 
 fun main() {
     var failed = 0
-    fun check(name: String, ok: Boolean, detail: String = "") {
-        println((if (ok) "PASS " else "FAIL ") + name + (if (detail.isNotEmpty()) "  ($detail)" else ""))
+    fun check(name: String, ok: Boolean, detail: String = "", quiet: Boolean = false) {
+        if (!quiet || !ok) println((if (ok) "PASS " else "FAIL ") + name + (if (detail.isNotEmpty()) "  ($detail)" else ""))
         if (!ok) failed++
     }
 
@@ -205,6 +206,111 @@ fun main() {
     repeat(50) { arm2.jog(doubleArrayOf(0.0, 0.0, 0.0, 0.0, -1.0, 0.0)); arm2.tick(0.02); sim2.step(0.02) }
     check("遥控手腕不能压进包络", q2()[4] >= env.minWrist(q2())!! - 0.01)
     arm2.disable()
+
+    // 6. 逆运动学：随机取可达的关节角 → 正解得到夹爪位姿 → 从回零姿态求逆解，应能回到同一位姿
+    val ik = ArmIk(cal2)
+    val rnd = java.util.Random(7)
+    val home = ik.project(DoubleArray(6))
+    var ok = 0; var total = 0; var worstMs = 0L; var sumMs = 0L
+    val misses = mutableListOf<String>()
+    repeat(200) {
+        val q = ik.project(DoubleArray(6) { i -> val j = cal2.joints[i]; j.minRad + (j.maxRad - j.minRad) * rnd.nextDouble() })
+        val target = ik.forward(q)
+        val t0 = System.nanoTime()
+        val r = ik.solveBest(target, home)
+        val ms = (System.nanoTime() - t0) / 1_000_000; worstMs = maxOf(worstMs, ms); sumMs += ms
+        total++
+        if (r.reached) ok++ else if (misses.size < 3) misses += "pos ${"%.1f".format(r.posErr * 1000)}mm rot ${"%.1f".format(Math.toDegrees(r.rotErr))}°"
+        // 解出的关节角必须在限位内、手腕不进包络
+        check("逆解在限位内 #$it", r.q.withIndex().all { (i, v) -> v >= cal2.joints[i].minRad - 1e-9 && v <= cal2.joints[i].maxRad + 1e-9 } &&
+            (env.minWrist(r.q)?.let { r.q[4] >= it - 1e-9 } ?: true), quiet = true)
+    }
+    check("逆解成功率", ok >= total * 0.95, "$ok/$total，平均 ${sumMs / total} ms，最慢 $worstMs ms ${misses.joinToString()}")
+    // 正解/逆解往返：ToolPose 欧拉角 ↔ 旋转矩阵
+    val tp = ToolPose(0.1, 0.05, 0.2, 0.3, -0.7, 0.4)
+    check("位姿欧拉角往返", ToolPose.of(tp.p, tp.r()).let { abs(it.yaw - tp.yaw) + abs(it.pitch - tp.pitch) + abs(it.roll - tp.roll) < 1e-9 })
+    val zeroTool = ik.forward(DoubleArray(6))
+    check("零位夹爪朝下", Math.toDegrees(zeroTool.pitch) < -80, "零位夹爪 ${"%.0f".format(zeroTool.x * 1000)} ${"%.0f".format(zeroTool.y * 1000)} ${"%.0f".format(zeroTool.z * 1000)} mm，仰角 ${"%.0f".format(Math.toDegrees(zeroTool.pitch))}°")
+
+    // 7. 控制器：空间移动、空间点动、录制回放（arm2 标定 + 模拟总线）
+    val sim3 = SimBus(cal2.servoIds, start2)
+    val arm3 = ArmController(StsBus(sim3, 5), cal2)
+    arm3.enable()
+    fun run3(seconds: Double) { val dt = 0.02; repeat((seconds / dt).toInt()) { arm3.tick(dt); sim3.step(dt) } }
+    fun meas3() = cal2.joints.map { it.toRad(sim3.servos[it.servoId]!!.pos.toInt()) }.toDoubleArray()
+    val goalQ = ik.project(doubleArrayOf(0.4, Math.toRadians(-60.0), Math.toRadians(-100.0), 0.2, Math.toRadians(70.0), 0.3))
+    val goalPose = ik.forward(goalQ)
+    val res3 = arm3.moveToPose(goalPose)
+    run3(15.0)
+    val (pNow, rNow) = ik.fk(meas3())
+    val posErr3 = sqrt((0..2).sumOf { (pNow[it] - goalPose.p[it]).let { d -> d * d } })
+    check("移动到空间位姿", res3?.reached == true && posErr3 < 0.003 && arm3.state.mode == ArmController.Mode.IDLE,
+        "实际误差 ${"%.1f".format(posErr3 * 1000)} mm，模式 ${arm3.state.mode}")
+    // 空间点动：底座坐标系向上 3 cm/s 走 1 秒，朝向和水平位置不变
+    val (p0j, r0j) = ik.fk(arm3.state.setpoint)
+    repeat(50) { arm3.jogTool(doubleArrayOf(0.0, 0.0, 0.03, 0.0, 0.0, 0.0)); arm3.tick(0.02); sim3.step(0.02) }
+    val (p1j, r1j) = ik.fk(arm3.state.setpoint)
+    val rotDrift = Rot.errorVec(r0j, r1j).let { sqrt(it.sumOf { v -> v * v }) }
+    check("空间点动沿 Z 上升", abs(p1j[2] - p0j[2] - 0.03) < 0.004 && abs(p1j[0] - p0j[0]) < 0.002 && abs(p1j[1] - p0j[1]) < 0.002 && rotDrift < Math.toRadians(1.0),
+        "Δz ${"%.1f".format((p1j[2] - p0j[2]) * 1000)} mm，Δx ${"%.1f".format((p1j[0] - p0j[0]) * 1000)}，Δy ${"%.1f".format((p1j[1] - p0j[1]) * 1000)}，朝向漂移 ${"%.2f".format(Math.toDegrees(rotDrift))}°，被挡 ${arm3.state.toolBlocked}")
+    // 夹爪坐标系：沿指向前伸 2 cm
+    val (p2j, r2j) = ik.fk(arm3.state.setpoint)
+    repeat(50) { arm3.jogTool(doubleArrayOf(0.02, 0.0, 0.0, 0.0, 0.0, 0.0), inToolFrame = true); arm3.tick(0.02); sim3.step(0.02) }
+    val (p3jf, _) = ik.fk(arm3.state.setpoint)
+    val along = (0..2).sumOf { (p3jf[it] - p2j[it]) * r2j[it * 3] }
+    check("空间点动沿夹爪指向前伸", abs(along - 0.02) < 0.004, "前伸 ${"%.1f".format(along * 1000)} mm")
+    // 绕竖直轴转 0.15 rad/s 一秒：位置不变。先回到工作空间中部（靠近底座轴线时转向需要的关节速度会放大很多倍，会被自动放慢）
+    arm3.moveTo(goalQ); run3(10.0)
+    val (p3j, r2j0) = ik.fk(arm3.state.setpoint)
+    var blockedTicks = 0
+    repeat(50) { arm3.jogTool(doubleArrayOf(0.0, 0.0, 0.0, 0.0, 0.0, 0.15)); arm3.tick(0.02); sim3.step(0.02); if (arm3.state.toolBlocked) blockedTicks++ }
+    val (p4j, r4j) = ik.fk(arm3.state.setpoint)
+    val turned = Rot.errorVec(r2j0, r4j)[2]
+    check("空间点动原地转向", sqrt((0..2).sumOf { (p4j[it] - p3j[it]).let { d -> d * d } }) < 0.003 && abs(turned - 0.15) < 0.03,
+        "转了 ${"%.1f".format(Math.toDegrees(turned))}°，被挡 ${arm3.state.toolBlocked}，关节 ${arm3.state.setpoint.joinToString { "%.0f".format(Math.toDegrees(it)) }}")
+    // 点动到工作空间外：一直往外推，被挡住但不报错、不越限
+    repeat(400) { arm3.jogTool(doubleArrayOf(0.1, 0.0, 0.0, 0.0, 0.0, 0.0), inToolFrame = true); arm3.tick(0.02); sim3.step(0.02) }
+    check("点动到边界被挡住", arm3.state.toolBlocked && arm3.state.mode != ArmController.Mode.FAULT &&
+        arm3.state.setpoint.withIndex().all { (i, v) -> v >= cal2.joints[i].minRad - 1e-9 && v <= cal2.joints[i].maxRad + 1e-9 })
+    run3(1.0)
+    // 录制：上力时界面操控（关节点动 + 夹爪），结束后回放，终点一致
+    arm3.moveTo(home); run3(15.0)
+    arm3.startRecording()
+    repeat(60) { arm3.jog(doubleArrayOf(0.5, -0.5, 0.0, 0.0, 0.0, 0.0)); arm3.tick(0.02); sim3.step(0.02) }
+    arm3.setGripper(0.8)
+    repeat(60) { arm3.jogTool(doubleArrayOf(0.0, 0.0, 0.02, 0.0, 0.0, 0.0)); arm3.tick(0.02); sim3.step(0.02) }
+    run3(0.5)
+    val recEnd = arm3.state.setpoint.copyOf()
+    val rec = arm3.stopRecording("测试")
+    check("录制得到轨迹", rec != null && rec.samples.size > 40 && abs(rec.durationS - 2.9) < 0.3, "${rec?.samples?.size} 个采样，${"%.1f".format(rec?.durationS)} 秒")
+    val recJson = Recording.listFromJson(Recording.listToJson(listOf(rec!!))).single()
+    check("轨迹 JSON 往返", recJson.samples.size == rec.samples.size && abs(recJson.samples.last()[0] - rec.samples.last()[0]) < 1e-4)
+    arm3.moveTo(home); run3(15.0)
+    arm3.playRecording(recJson)
+    var sawPlayback = false
+    repeat(1500) { arm3.tick(0.02); sim3.step(0.02); if (arm3.state.mode == ArmController.Mode.PLAYBACK) sawPlayback = true }
+    val endErr = (0 until 6).maxOf { abs(meas3()[it] - recEnd[it]) }
+    check("回放到达录制终点", sawPlayback && endErr < 0.01 && arm3.state.mode == ArmController.Mode.IDLE && abs((arm3.state.gripper ?: 0.0) - 0.8) < 0.02,
+        "终点误差 ${"%.4f".format(endErr)} rad，夹爪 ${arm3.state.gripper}")
+    // 卸力手掰录制：模拟用手把底座转 30°、大臂抬 20°
+    arm3.moveTo(home); run3(15.0)
+    arm3.disable()
+    arm3.startRecording()
+    val s1 = sim3.servos[1]!!; val s2 = sim3.servos[2]!!
+    val t1 = cal2.joints[0].toTick(Math.toRadians(30.0)); val t2 = cal2.joints[1].toTick(Math.toRadians(-20.0))
+    val a1 = s1.pos; val a2 = s2.pos
+    repeat(100) { k -> s1.pos = a1 + (t1 - a1) * (k + 1) / 100; s2.pos = a2 + (t2 - a2) * (k + 1) / 100; arm3.tick(0.02) }
+    val handRec = arm3.stopRecording("手掰")
+    check("卸力手掰录制", handRec != null && abs(handRec.samples.last()[0] - Math.toRadians(30.0)) < 0.01 && abs(handRec.samples.last()[1] - Math.toRadians(-20.0)) < 0.01,
+        "${handRec?.samples?.size} 个采样")
+    // 手掰的末端可能进包络（大臂 −20° 时手腕要 ≥ 7.8°），回放时自动抬手腕
+    for (sv in sim3.servos.values) sv.goal = sv.pos.toInt()
+    arm3.enable(); arm3.moveTo(home); run3(15.0)
+    arm3.playRecording(handRec!!); run3(20.0)
+    val m3 = meas3()
+    check("手掰轨迹回放并套用包络", abs(m3[0] - Math.toRadians(30.0)) < 0.02 && m3[4] >= env.minWrist(m3)!! - 0.01,
+        "底座 ${"%.1f".format(Math.toDegrees(m3[0]))}° 手腕 ${"%.1f".format(Math.toDegrees(m3[4]))}°")
+    arm3.disable()
 
     println(if (failed == 0) "全部通过" else "$failed 项失败")
     exitProcess(if (failed == 0) 0 else 1)
