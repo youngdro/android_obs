@@ -96,7 +96,7 @@ fun main() {
     // 4. 控制器 + 模拟总线
     val start = cal.joints.associate { it.servoId to it.zeroTick } + (7 to cal.gripper!!.closedTick)
     val sim = SimBus(cal.servoIds, start)
-    val arm = ArmController(StsBus(sim, 5), cal)
+    val arm = ArmController(StsBus(sim, 5), cal, ArmController.Config(maxVelRad = 1.0, maxAccRad = 2.0))
     check("上力", arm.enable() && sim.servos.values.all { it.torque && it.limit == 400 })
     check("上力不跳动", sim.servos.all { (id, s) -> s.goal == start[id] })
     fun run(seconds: Double) { val dt = 0.02; repeat((seconds / dt).toInt()) { arm.tick(dt); sim.step(dt) } }
@@ -162,7 +162,7 @@ fun main() {
     // 实机收拢时手腕在零位附近；这里从手腕已让开 10° 的“回零”姿态开始
     val start2 = cal2.joints.associate { it.servoId to (if (it.servoId == 5) it.toTick(Math.toRadians(10.0)) else it.zeroTick) } + (7 to cal2.gripper!!.closedTick)
     val sim2 = SimBus(cal2.servoIds, start2)
-    val arm2 = ArmController(StsBus(sim2, 5), cal2)
+    val arm2 = ArmController(StsBus(sim2, 5), cal2, ArmController.Config(maxVelRad = 1.0, maxAccRad = 2.0))
     arm2.enable()
     fun q2(): DoubleArray = cal2.joints.map { it.toRad(sim2.servos[it.servoId]!!.pos.toInt()) }.toDoubleArray()
     var worstGap = 0.0

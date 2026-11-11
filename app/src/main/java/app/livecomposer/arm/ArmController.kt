@@ -22,8 +22,9 @@ class ArmController(
 ) {
     data class Config(
         val torqueLimitPermille: Int = 400,
-        val maxVelRad: Double = 1.0,
-        val maxAccRad: Double = 2.0,
+        /** 轨迹速度上限：实机上小臂展开收回 6 秒（≈0.9 rad/s 峰值）会跟不上，12 秒可以，取 0.5。 */
+        val maxVelRad: Double = 0.5,
+        val maxAccRad: Double = 1.0,
         /** 遥控时每个关节的最大速度。 */
         val jogVelRad: Double = 0.6,
         val abortLoad: Int = 400,
