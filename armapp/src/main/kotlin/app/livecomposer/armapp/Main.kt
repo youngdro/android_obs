@@ -135,6 +135,7 @@ fun ArmScreen(s: ArmSession, dark: Boolean) {
             Column(Modifier.padding(12.dp).align(Alignment.TopStart)) {
                 Text(statusLine(snap), fontWeight = FontWeight.SemiBold)
                 snap.message?.let { Text(it, fontSize = 13.sp) }
+                snap.lastFault?.let { if (snap.state?.mode != ArmController.Mode.FAULT) Text("最近一次故障：$it", fontSize = 12.sp, color = Color(0xFFE5484D)) }
                 if (st?.toolBlocked == true) Text("够不着：已到限位或工作空间边缘", color = Color(0xFFE5484D), fontSize = 13.sp)
                 Text("拖橙色圆点 = 设定夹爪目标（松手后过去），拖空白处 = 旋转视角，滚轮缩放", fontSize = 11.sp, color = Color.Gray)
             }

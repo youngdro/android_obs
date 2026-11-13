@@ -40,8 +40,13 @@ class ArmController(
         /** 遥控时每个关节的最大速度。 */
         val jogVelRad: Double = 0.6,
         val abortLoad: Int = 400,
-        /** 设定点与实际位置相差超过它（tick）且持续 [followTimeoutS] 判为卡住。 */
+        /**
+         * 卡住判定：某关节落后设定点超过它（tick），并且一个监测周期里朝设定点走不到 [followProgressTicks]，持续 [followTimeoutS] 判为卡住。
+         * 只是"追得慢"（大幅快速动作、力矩不够快）不算卡住；落后超过 [followMaxTicks] 时不管有没有在追都算。
+         */
         val followErrorTicks: Int = 120,
+        val followProgressTicks: Int = 4,
+        val followMaxTicks: Int = 700,
         val followTimeoutS: Double = 1.0,
         /** 每隔几个周期读一次负载和位置（总线带宽有限）。 */
         val monitorEvery: Int = 5,
@@ -94,6 +99,7 @@ class ArmController(
     private var levelRef: DoubleArray? = null
     private var ticks = 0
     private var stuckS = 0.0
+    private val prevTicks = arrayOfNulls<Int>(cal.joints.size)
 
     val state: State get() = State(
         mode, measured.copyOf(), gripperMeasured, loads.copyOf(), fault, setpoint.copyOf(), toolBlocked, recorder != null,
@@ -161,6 +167,7 @@ class ArmController(
     /** 上力：先把设定点设为当前位置再开扭矩，避免上电瞬间跳动。 */
     fun enable(): Boolean {
         if (!readPose()) return fail("读位置失败")
+        prevTicks.fill(null); stuckS = 0.0
         for ((i, j) in cal.joints.withIndex()) {
             val t = j.clampTick(j.toTick(measured[i]))
             setpoint[i] = j.toRad(t)
@@ -514,22 +521,29 @@ class ArmController(
     }
 
     private fun monitor(periodS: Double) {
-        var worst = 0
+        var stalled: Pair<String, Int>? = null
         for ((i, j) in cal.joints.withIndex()) {
             val p = bus.position(j.servoId) ?: return trip("舵机 ${j.servoId} 无应答")
             measured[i] = j.toRad(p)
             val l = bus.load(j.servoId) ?: 0
             loads[i] = l
             if (abs(l) > config.abortLoad) return trip("${j.name} 负载 $l 超限，可能撞到东西")
-            worst = max(worst, abs(p - j.toTick(setpoint[i])))
+            val err = j.clampTick(j.toTick(setpoint[i])) - p
+            val prev = prevTicks[i]; prevTicks[i] = p
+            // 朝设定点方向走了多少
+            val progress = if (prev == null) Int.MAX_VALUE else (p - prev) * Integer.signum(err)
+            val lagging = abs(err) > config.followErrorTicks
+            if ((lagging && progress < config.followProgressTicks) || abs(err) > config.followMaxTicks) {
+                if (stalled == null || abs(err) > stalled.second) stalled = j.name to abs(err)
+            }
         }
         cal.gripper?.let { g -> bus.position(g.servoId)?.let { gripperMeasured = g.toOpen(it) } }
-        stuckS = if (worst > config.followErrorTicks) stuckS + periodS else 0.0
-        if (stuckS > config.followTimeoutS) trip("关节跟不上设定点（偏差 $worst tick），可能卡住")
+        stuckS = if (stalled != null) stuckS + periodS else 0.0
+        if (stuckS > config.followTimeoutS) trip("${stalled!!.first} 跟不上设定点也不再靠近（偏差 ${stalled.second} tick），可能卡住或撞到东西")
     }
 
     private fun trip(reason: String) {
-        stop(reason); mode = Mode.FAULT; fault = reason; stuckS = 0.0
+        stop(reason); mode = Mode.FAULT; fault = reason; stuckS = 0.0; prevTicks.fill(null)
     }
 
     private fun fail(reason: String): Boolean { mode = Mode.FAULT; fault = reason; log(reason); return false }

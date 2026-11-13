@@ -27,6 +27,8 @@ class ArmSession(val cal: ArmCalibration, private val dataDir: File) {
         val recordingState: RecordingState = RecordingState.IDLE,
         val recordingSeconds: Double = 0.0,
         val message: String? = null,
+        /** 最近一次故障原因（不会被后续提示覆盖）。 */
+        val lastFault: String? = null,
     )
 
     enum class RecordingState { IDLE, GOING_HOME, RECORDING, RECORDING_BY_HAND }
@@ -143,7 +145,8 @@ class ArmSession(val cal: ArmCalibration, private val dataDir: File) {
 
     fun deleteRecording(name: String) = post { recordings.removeAll { it.name == name }; saveRecordings() }
 
-    private fun say(m: String) { message = m }
+    private fun say(m: String) { message = m; println("[机械臂] $m") }
+    private var lastFault: String? = null
 
     private fun loop(a0: ArmController, port: String) {
         var last = System.nanoTime()
@@ -171,13 +174,14 @@ class ArmSession(val cal: ArmCalibration, private val dataDir: File) {
             }
             if (n++ % 2 == 0) {
                 val st = armNow.state
+                st.fault?.let { if (it != lastFault) { lastFault = it; println("[机械臂] 故障：$it") } }
                 val q = if (st.mode == ArmController.Mode.OFF) st.q else st.setpoint
                 snapshot = Snapshot(
                     link = port, state = st, torquePct = torquePct,
                     tool = ik.forward(q), toolTarget = lastTarget,
                     recordings = recordings.toList(), recordingState = recState,
                     recordingSeconds = if (recState == RecordingState.RECORDING || recState == RecordingState.RECORDING_BY_HAND) (System.nanoTime() - recStartedAt) / 1e9 else 0.0,
-                    message = message,
+                    message = message, lastFault = lastFault,
                 )
             }
             val spent = (System.nanoTime() - now) / 1_000_000

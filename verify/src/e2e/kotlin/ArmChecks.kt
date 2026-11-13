@@ -336,6 +336,14 @@ fun main() {
         return t
     }
     val pt1 = playTime(1.0); val pt2 = playTime(2.0)
+    // 舵机跟得慢（力矩不够）但一直在追：不算卡住
+    sim3.maxTicksPerS = 700.0
+    arm3.moveTo(home); run3(15.0)
+    arm3.playRecording(fast, 1.0, maxVelRad = 4.0); repeat(400) { arm3.tick(0.02); sim3.step(0.02) }
+    val slowOk = arm3.state.mode != ArmController.Mode.FAULT
+    val slowFault = arm3.state.fault
+    arm3.clearFault(); sim3.maxTicksPerS = 3000.0
+    check("跟得慢但在追不算卡住", slowOk, slowFault ?: "")
     check("快速动作按原速回放", abs(pt1 - 1.0) < 0.1 && abs(pt2 - 0.5) < 0.1, "1 倍 ${"%.2f".format(pt1)} 秒，2 倍 ${"%.2f".format(pt2)} 秒")
 
     // 握持：慢慢合上，碰到东西（负载升高）就锁定；锁定后回放、卸力都不松开
